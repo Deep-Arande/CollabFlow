@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import { v4 as uuid } from 'crypto';
+import { randomUUID } from 'crypto';
 import { FileType } from '@prisma/client';
 import { prisma } from '../services/prisma.service';
 import { asyncHandler } from '../utils/asyncHandler';
@@ -30,7 +30,7 @@ export const uploadAttachment = asyncHandler(async (req: Request, res: Response)
   }
 
   const ext = req.file.originalname.split('.').pop();
-  const filePath = `project-${task.projectId}/task-${taskId}/${uuid()}.${ext}`;
+  const filePath = `project-${task.projectId}/task-${taskId}/${randomUUID()}.${ext}`;
 
   const storedPath = await storage.uploadFile(req.file.buffer, filePath, req.file.mimetype);
 

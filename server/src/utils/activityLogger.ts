@@ -1,4 +1,4 @@
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, Prisma } from '@prisma/client';
 import { prisma } from '../services/prisma.service';
 
 interface LogParams {
@@ -20,7 +20,7 @@ export const logActivity = (params: LogParams, tx?: Omit<PrismaClient, '$connect
       action: params.action,
       targetType: params.targetType,
       targetId: params.targetId,
-      metadata: params.metadata ?? {},
+      metadata: (params.metadata ?? {}) as Prisma.InputJsonValue,
     },
   });
 };
