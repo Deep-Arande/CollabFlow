@@ -4,8 +4,7 @@ dotenv.config();
 
 export default defineConfig({
   datasource: {
-    // CLI operations (migrate, db push, generate) always use the direct connection.
-    // App runtime uses DATABASE_URL (pooled) via the pg adapter in prisma.service.ts.
+    // CLI operations always use the direct connection (no PgBouncer)
     url: process.env.DIRECT_URL!,
   },
 });
