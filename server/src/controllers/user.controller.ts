@@ -32,18 +32,20 @@ export const listUsers = asyncHandler(async (req: Request, res: Response) => {
 
 export const searchUsers = asyncHandler(async (req: Request, res: Response) => {
   const { q } = req.query as { q?: string };
-  if (!q) return api.success(res, { users: [] });
+
+  if (!q || q.trim().length < 1) return api.success(res, { users: [] });
 
   const users = await prisma.user.findMany({
     where: {
       isActive: true,
       OR: [
-        { name: { contains: q, mode: 'insensitive' } },
-        { email: { contains: q, mode: 'insensitive' } },
+        { name: { contains: q.trim(), mode: 'insensitive' } },
+        { email: { contains: q.trim(), mode: 'insensitive' } },
       ],
     },
     select: { id: true, name: true, email: true, role: true, avatarUrl: true },
-    take: 10,
+    take: 20,
+    orderBy: { name: 'asc' },
   });
 
   return api.success(res, { users });
