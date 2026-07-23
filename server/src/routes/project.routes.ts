@@ -8,6 +8,7 @@ import {
   deleteProject,
   getProjectMembers,
   addProjectMember,
+  updateProjectMemberRole,
   removeProjectMember,
 } from '../controllers/project.controller';
 import { authenticate } from '../middleware/auth.middleware';
@@ -27,6 +28,7 @@ router.delete('/:id', requireProjectMember, deleteProject);
 
 router.get('/:id/members', requireProjectMember, getProjectMembers);
 router.post('/:id/members', requireProjectMember, addProjectMember);
+router.patch('/:id/members/:userId', requireProjectMember, updateProjectMemberRole);
 router.delete('/:id/members/:userId', requireProjectMember, removeProjectMember);
 
 export default router;

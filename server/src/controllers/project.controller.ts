@@ -123,7 +123,15 @@ export const addProjectMember = asyncHandler(async (req: Request, res: Response)
 
   const project = await prisma.project.findUnique({ where: { id: projectId } });
   if (!project) return api.error(res, 'Project not found', 404);
-  if (actorRole !== 'ADMIN' && project.createdBy !== actorId) return api.error(res, 'Forbidden', 403);
+
+  if (actorRole !== 'ADMIN') {
+    const actorMembership = await prisma.projectMember.findUnique({
+      where: { projectId_userId: { projectId, userId: actorId } },
+    });
+    if (!actorMembership || actorMembership.role !== 'LEAD') {
+      return api.error(res, 'Only project leads can add members', 403);
+    }
+  }
 
   const exists = await prisma.projectMember.findUnique({
     where: { projectId_userId: { projectId, userId } },
@@ -139,6 +147,33 @@ export const addProjectMember = asyncHandler(async (req: Request, res: Response)
   return api.success(res, { member }, 'Member added', 201);
 });
 
+export const updateProjectMemberRole = asyncHandler(async (req: Request, res: Response) => {
+  const { userId: actorId, role: actorRole } = req.user!;
+  const { id: projectId, userId } = req.params;
+  const { role: newRole } = req.body;
+
+  if (!['LEAD', 'MEMBER'].includes(newRole)) return api.error(res, 'Role must be LEAD or MEMBER', 400);
+
+  if (actorRole !== 'ADMIN') {
+    const actorMembership = await prisma.projectMember.findUnique({
+      where: { projectId_userId: { projectId, userId: actorId } },
+    });
+    if (!actorMembership || actorMembership.role !== 'LEAD') {
+      return api.error(res, 'Only project leads can change member roles', 403);
+    }
+  }
+
+  if (actorId === userId) return api.error(res, 'Cannot change your own project role', 400);
+
+  const member = await prisma.projectMember.update({
+    where: { projectId_userId: { projectId, userId } },
+    data: { role: newRole },
+    include: { user: { select: { id: true, name: true, email: true, avatarUrl: true, role: true } } },
+  });
+
+  return api.success(res, { member });
+});
+
 export const removeProjectMember = asyncHandler(async (req: Request, res: Response) => {
   const { userId: actorId, role: actorRole } = req.user!;
   const projectId = req.params.id;
@@ -146,7 +181,16 @@ export const removeProjectMember = asyncHandler(async (req: Request, res: Respon
 
   const project = await prisma.project.findUnique({ where: { id: projectId } });
   if (!project) return api.error(res, 'Project not found', 404);
-  if (actorRole !== 'ADMIN' && project.createdBy !== actorId) return api.error(res, 'Forbidden', 403);
+
+  if (actorRole !== 'ADMIN') {
+    const actorMembership = await prisma.projectMember.findUnique({
+      where: { projectId_userId: { projectId, userId: actorId } },
+    });
+    if (!actorMembership || actorMembership.role !== 'LEAD') {
+      return api.error(res, 'Only project leads can remove members', 403);
+    }
+  }
+
   if (project.createdBy === userId) return api.error(res, 'Cannot remove the project owner', 400);
 
   await prisma.$transaction(async (tx) => {
