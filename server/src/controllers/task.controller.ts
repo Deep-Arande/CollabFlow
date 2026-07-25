@@ -7,11 +7,13 @@ import { logActivity } from '../utils/activityLogger';
 
 export const listTasks = asyncHandler(async (req: Request, res: Response) => {
   const { projectId } = req.params;
+  const { userId, role } = req.user!;
   const { status, priority, assignedTo, search } = req.query as Record<string, string>;
 
   const tasks = await prisma.task.findMany({
     where: {
       projectId,
+      ...(role === 'TEAM_MEMBER' && { OR: [{ assignedTo: userId }, { createdBy: userId }] }),
       ...(status && { status: status as never }),
       ...(priority && { priority: priority as never }),
       ...(assignedTo && { assignedTo }),
@@ -71,9 +73,14 @@ export const createTask = asyncHandler(async (req: Request, res: Response) => {
 
 export const getTaskById = asyncHandler(async (req: Request, res: Response) => {
   const { projectId, id } = req.params;
+  const { userId, role } = req.user!;
 
   const task = await prisma.task.findFirst({
-    where: { id, projectId },
+    where: {
+      id,
+      projectId,
+      ...(role === 'TEAM_MEMBER' && { OR: [{ assignedTo: userId }, { createdBy: userId }] }),
+    },
     include: {
       assignee: { select: { id: true, name: true, avatarUrl: true } },
       creator: { select: { id: true, name: true } },

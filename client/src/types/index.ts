@@ -82,6 +82,7 @@ export interface Attachment {
   fileName: string;
   createdAt: string;
   url?: string;
+  uploader?: { id: string; name: string };
 }
 
 export interface ActivityLog {

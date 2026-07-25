@@ -16,6 +16,9 @@ build/
 .next/
 out/
 
+# Vite cache
+client/.vite/
+
 # Prisma
 server/src/prisma/migrations/dev.db
 server/src/prisma/*.db

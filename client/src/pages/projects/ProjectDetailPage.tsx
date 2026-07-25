@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { format } from 'date-fns';
 import {
   Plus, ArrowLeft, Trash2, MessageSquare, Calendar, User, Flag, Send, Shield,
+  Paperclip, Upload, Download, FileText, Image as ImageIcon,
 } from 'lucide-react';
 import { projectService } from '../../services/project.service';
 import { taskService } from '../../services/task.service';
@@ -14,6 +15,7 @@ import { commentService } from '../../services/comment.service';
 import { activityService } from '../../services/activity.service';
 import { userService } from '../../services/user.service';
 import { labelService } from '../../services/label.service';
+import { attachmentService } from '../../services/attachment.service';
 import { Header } from '../../components/layout/Header';
 import { Button } from '../../components/ui/Button';
 import { Input } from '../../components/ui/Input';
@@ -24,7 +26,7 @@ import { Avatar } from '../../components/ui/Avatar';
 import { PageSpinner } from '../../components/ui/Spinner';
 import { useAuth } from '../../context/AuthContext';
 import { useSocket } from '../../context/SocketContext';
-import type { Task, TaskStatus, Comment, ProjectMember } from '../../types';
+import type { Task, TaskStatus, Comment, ProjectMember, Attachment } from '../../types';
 
 const COLUMNS: { status: TaskStatus; label: string; color: string }[] = [
   { status: 'TODO', label: 'To Do', color: 'border-t-gray-400' },
@@ -90,6 +92,7 @@ function TaskDetailModal({
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionStart, setMentionStart] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const attachFileRef = useRef<HTMLInputElement>(null);
 
   const { data: fullTask } = useQuery({
     queryKey: ['task', projectId, task.id],
@@ -117,6 +120,21 @@ function TaskDetailModal({
       setMentionQuery(null);
     },
   });
+
+  const { mutate: uploadAttachment, isPending: uploading } = useMutation({
+    mutationFn: (file: File) => attachmentService.upload(task.id, file),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['task', projectId, task.id] }),
+  });
+
+  const { mutate: removeAttachment } = useMutation({
+    mutationFn: (attachmentId: string) => attachmentService.delete(task.id, attachmentId),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['task', projectId, task.id] }),
+  });
+
+  const openAttachment = async (att: Attachment) => {
+    const url = await attachmentService.getSignedUrl(task.id, att.id);
+    window.open(url, '_blank', 'noopener,noreferrer');
+  };
 
   const handleCommentChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
@@ -152,21 +170,33 @@ function TaskDetailModal({
 
   const t = fullTask ?? task;
   const canEdit = user?.role === 'ADMIN' || user?.role === 'TEAM_LEAD' || user?.id === task.assignedTo || user?.id === task.createdBy;
+  const canChangeStatus = user?.role === 'ADMIN' || user?.role === 'TEAM_LEAD' || user?.id === task.assignedTo;
 
   return (
     <div className="space-y-5">
       {/* Status selector */}
       <div className="flex items-center gap-2 flex-wrap">
         {COLUMNS.map((col) => (
-          <button
-            key={col.status}
-            onClick={() => updateStatus(col.status)}
-            className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
-              t.status === col.status ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-            }`}
-          >
-            {col.label}
-          </button>
+          canChangeStatus ? (
+            <button
+              key={col.status}
+              onClick={() => updateStatus(col.status)}
+              className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+                t.status === col.status ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              }`}
+            >
+              {col.label}
+            </button>
+          ) : (
+            <span
+              key={col.status}
+              className={`rounded-full px-3 py-1 text-xs font-medium ${
+                t.status === col.status ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-400'
+              }`}
+            >
+              {col.label}
+            </span>
+          )
         ))}
       </div>
 
@@ -189,6 +219,21 @@ function TaskDetailModal({
         )}
       </div>
 
+      {/* Labels */}
+      {(t.labels ?? []).length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {(t.labels ?? []).map(({ label }) => (
+            <span
+              key={label.id}
+              className="flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium text-white"
+              style={{ backgroundColor: label.color }}
+            >
+              {label.name}
+            </span>
+          ))}
+        </div>
+      )}
+
       {/* Description */}
       {t.description && (
         <div>
@@ -196,6 +241,68 @@ function TaskDetailModal({
           <p className="text-sm text-gray-700 whitespace-pre-wrap">{t.description}</p>
         </div>
       )}
+
+      {/* Attachments */}
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <p className="text-xs font-medium text-gray-400 uppercase tracking-wide flex items-center gap-1">
+            <Paperclip className="h-3.5 w-3.5" /> Attachments ({t.attachments?.length ?? 0})
+          </p>
+          <button
+            onClick={() => attachFileRef.current?.click()}
+            disabled={uploading}
+            className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-indigo-600 hover:bg-indigo-50 disabled:opacity-50 transition-colors"
+          >
+            <Upload className="h-3.5 w-3.5" />
+            {uploading ? 'Uploading…' : 'Upload'}
+          </button>
+          <input
+            ref={attachFileRef}
+            type="file"
+            className="hidden"
+            accept=".pdf,.jpg,.jpeg,.png,.gif,.webp,.docx"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) uploadAttachment(file);
+              e.target.value = '';
+            }}
+          />
+        </div>
+        {(t.attachments ?? []).length > 0 && (
+          <div className="space-y-2">
+            {(t.attachments ?? []).map((att) => (
+              <div key={att.id} className="flex items-center gap-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+                {att.fileType === 'IMAGE'
+                  ? <ImageIcon className="h-4 w-4 text-blue-500 shrink-0" />
+                  : <FileText className="h-4 w-4 text-red-500 shrink-0" />
+                }
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-gray-800 truncate">{att.fileName}</p>
+                  <p className="text-xs text-gray-400">
+                    {att.uploader?.name ?? 'Unknown'} · {format(new Date(att.createdAt), 'MMM d')}
+                  </p>
+                </div>
+                <button
+                  onClick={() => openAttachment(att)}
+                  title="Download / view"
+                  className="rounded-md p-1 text-gray-400 hover:bg-white hover:text-indigo-600 transition-colors"
+                >
+                  <Download className="h-4 w-4" />
+                </button>
+                {(user?.id === att.uploadedBy || user?.role === 'ADMIN' || user?.role === 'TEAM_LEAD') && (
+                  <button
+                    onClick={() => { if (confirm('Delete this attachment?')) removeAttachment(att.id); }}
+                    title="Delete attachment"
+                    className="rounded-md p-1 text-gray-400 hover:bg-red-50 hover:text-red-500 transition-colors"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       {/* Comments */}
       <div>
@@ -290,6 +397,8 @@ export function ProjectDetailPage() {
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
   const [addMemberError, setAddMemberError] = useState<string | null>(null);
   const [selectedLabelIds, setSelectedLabelIds] = useState<string[]>([]);
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const createFileInputRef = useRef<HTMLInputElement>(null);
 
   const pid = projectId!;
 
@@ -356,16 +465,22 @@ export function ProjectDetailPage() {
   });
 
   const { mutate: createTask, isPending: creating } = useMutation({
-    mutationFn: (d: TaskFormData) =>
-      taskService.create(pid, {
+    mutationFn: async (d: TaskFormData) => {
+      const task = await taskService.create(pid, {
         ...d,
         status: newTaskStatus ?? undefined,
         labelIds: selectedLabelIds,
-      } as Parameters<typeof taskService.create>[1]),
+      } as Parameters<typeof taskService.create>[1]);
+      if (pendingFiles.length > 0) {
+        await Promise.allSettled(pendingFiles.map((f) => attachmentService.upload(task.id, f)));
+      }
+      return task;
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['tasks', pid] });
       setNewTaskStatus(null);
       setSelectedLabelIds([]);
+      setPendingFiles([]);
       reset();
     },
   });
@@ -571,7 +686,7 @@ export function ProjectDetailPage() {
       {/* Create task modal */}
       <Modal
         isOpen={!!newTaskStatus}
-        onClose={() => { setNewTaskStatus(null); setSelectedLabelIds([]); reset(); }}
+        onClose={() => { setNewTaskStatus(null); setSelectedLabelIds([]); setPendingFiles([]); reset(); }}
         title={`New task · ${COLUMNS.find((c) => c.status === newTaskStatus)?.label ?? ''}`}
       >
         <form onSubmit={handleSubmit((d) => createTask(d))} className="space-y-4">
@@ -637,8 +752,49 @@ export function ProjectDetailPage() {
               </div>
             </div>
           )}
+          {/* Attachments */}
+          <div className="flex flex-col gap-1.5">
+            <label className="text-sm font-medium text-gray-700">Attachments</label>
+            <input
+              ref={createFileInputRef}
+              type="file"
+              className="hidden"
+              accept=".pdf,.jpg,.jpeg,.png,.gif,.webp,.docx"
+              multiple
+              onChange={(e) => {
+                const files = Array.from(e.target.files ?? []);
+                if (files.length) setPendingFiles((prev) => [...prev, ...files]);
+                e.target.value = '';
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => createFileInputRef.current?.click()}
+              className="flex items-center gap-2 rounded-lg border border-dashed border-gray-300 px-3 py-2 text-sm text-gray-500 hover:border-indigo-400 hover:text-indigo-600 transition-colors"
+            >
+              <Paperclip className="h-4 w-4" /> Choose files…
+            </button>
+            {pendingFiles.length > 0 && (
+              <div className="flex flex-wrap gap-2 mt-1">
+                {pendingFiles.map((f, i) => (
+                  <div key={i} className="flex items-center gap-1.5 rounded-full bg-gray-100 px-3 py-1 text-xs text-gray-700">
+                    <Paperclip className="h-3 w-3 text-gray-400" />
+                    <span className="max-w-[120px] truncate">{f.name}</span>
+                    <button
+                      type="button"
+                      onClick={() => setPendingFiles((prev) => prev.filter((_, j) => j !== i))}
+                      className="ml-0.5 text-gray-400 hover:text-red-500"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
           <div className="flex justify-end gap-2 pt-1">
-            <Button variant="secondary" type="button" onClick={() => { setNewTaskStatus(null); setSelectedLabelIds([]); reset(); }}>Cancel</Button>
+            <Button variant="secondary" type="button" onClick={() => { setNewTaskStatus(null); setSelectedLabelIds([]); setPendingFiles([]); reset(); }}>Cancel</Button>
             <Button type="submit" isLoading={creating}>Create Task</Button>
           </div>
         </form>
