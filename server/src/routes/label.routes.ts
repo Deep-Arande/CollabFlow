@@ -1,15 +1,16 @@
 import { Router } from 'express';
 import { listLabels, createLabel, updateLabel, deleteLabel } from '../controllers/label.controller';
 import { authenticate } from '../middleware/auth.middleware';
-import { requireRole } from '../middleware/rbac.middleware';
+import { requireProjectMember } from '../middleware/rbac.middleware';
 
 const router = Router();
 
-router.use(authenticate);
+// Labels are project-scoped; any accepted member can manage them (Trello-style).
+router.use('/:projectId/labels', authenticate, requireProjectMember);
 
-router.get('/', listLabels);
-router.post('/', requireRole('ADMIN', 'TEAM_LEAD'), createLabel);
-router.patch('/:id', requireRole('ADMIN', 'TEAM_LEAD'), updateLabel);
-router.delete('/:id', requireRole('ADMIN'), deleteLabel);
+router.get('/:projectId/labels', listLabels);
+router.post('/:projectId/labels', createLabel);
+router.patch('/:projectId/labels/:id', updateLabel);
+router.delete('/:projectId/labels/:id', deleteLabel);
 
 export default router;

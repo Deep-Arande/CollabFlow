@@ -4,22 +4,16 @@ import { asyncHandler } from '../utils/asyncHandler';
 import * as api from '../utils/apiResponse';
 
 export const getActivity = asyncHandler(async (req: Request, res: Response) => {
-  const { userId, role } = req.user!;
+  const { userId } = req.user!;
   const { page = '1', limit = '30' } = req.query as Record<string, string>;
   const skip = (parseInt(page) - 1) * parseInt(limit);
 
-  let projectIds: string[] | undefined;
-  if (role === 'TEAM_LEAD') {
-    const led = await prisma.projectMember.findMany({ where: { userId }, select: { projectId: true } });
-    projectIds = led.map((m) => m.projectId);
-  }
-
-  const where =
-    role === 'ADMIN'
-      ? {}
-      : role === 'TEAM_LEAD'
-      ? { projectId: { in: projectIds } }
-      : { userId };
+  // Scope to activity in the projects the user LEADs.
+  const led = await prisma.projectMember.findMany({
+    where: { userId, role: 'LEAD', status: 'ACCEPTED' },
+    select: { projectId: true },
+  });
+  const where = { projectId: { in: led.map((m) => m.projectId) } };
 
   const [logs, total] = await Promise.all([
     prisma.activityLog.findMany({
@@ -36,17 +30,26 @@ export const getActivity = asyncHandler(async (req: Request, res: Response) => {
 });
 
 export const getAuditLog = asyncHandler(async (req: Request, res: Response) => {
+  const { userId } = req.user!;
   const { page = '1', limit = '50' } = req.query as Record<string, string>;
   const skip = (parseInt(page) - 1) * parseInt(limit);
 
+  // Audit is scoped to the projects the user LEADs.
+  const led = await prisma.projectMember.findMany({
+    where: { userId, role: 'LEAD', status: 'ACCEPTED' },
+    select: { projectId: true },
+  });
+  const where = { projectId: { in: led.map((m) => m.projectId) } };
+
   const [logs, total] = await Promise.all([
     prisma.activityLog.findMany({
+      where,
       include: { user: { select: { id: true, name: true, avatarUrl: true } } },
       orderBy: { createdAt: 'desc' },
       skip,
       take: parseInt(limit),
     }),
-    prisma.activityLog.count(),
+    prisma.activityLog.count({ where }),
   ]);
 
   return api.success(res, { logs, total, page: parseInt(page), limit: parseInt(limit) });

@@ -1,5 +1,6 @@
 import { Outlet, Navigate } from 'react-router-dom';
 import { Sidebar } from '../components/layout/Sidebar';
+import { InvitePopup } from '../components/InvitePopup';
 import { useAuth } from '../context/AuthContext';
 import { PageSpinner } from '../components/ui/Spinner';
 
@@ -17,6 +18,7 @@ export function AppLayout() {
           <Outlet />
         </main>
       </div>
+      <InvitePopup />
     </div>
   );
 }

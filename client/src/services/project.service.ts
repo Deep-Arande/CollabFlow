@@ -31,7 +31,9 @@ export const projectService = {
     return res.data.data!.members;
   },
 
-  async addMember(id: string, data: { userId: string; role?: string }) {
+  // Sends an invite (creates a PENDING membership). Re-inviting a previously
+  // declined user resets their invite back to PENDING on the same endpoint.
+  async sendInvite(id: string, data: { userId: string; role?: string }) {
     const res = await api.post<ApiResponse<{ member: ProjectMember }>>(`/projects/${id}/members`, data);
     return res.data.data!.member;
   },
@@ -43,5 +45,9 @@ export const projectService = {
   async updateMemberRole(id: string, userId: string, role: string) {
     const res = await api.patch<ApiResponse<{ member: ProjectMember }>>(`/projects/${id}/members/${userId}`, { role });
     return res.data.data!.member;
+  },
+
+  async leave(id: string) {
+    await api.post(`/projects/${id}/leave`);
   },
 };

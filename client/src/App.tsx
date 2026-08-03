@@ -9,7 +9,7 @@ import { RegisterPage } from './pages/auth/RegisterPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { ProjectsPage } from './pages/projects/ProjectsPage';
 import { ProjectDetailPage } from './pages/projects/ProjectDetailPage';
-import { TeamPage } from './pages/team/TeamPage';
+import { InvitesPage } from './pages/invites/InvitesPage';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -35,7 +35,7 @@ export default function App() {
                 <Route path="/" element={<DashboardPage />} />
                 <Route path="/projects" element={<ProjectsPage />} />
                 <Route path="/projects/:projectId" element={<ProjectDetailPage />} />
-                <Route path="/team" element={<TeamPage />} />
+                <Route path="/invites" element={<InvitesPage />} />
               </Route>
 
               <Route path="*" element={<Navigate to="/" replace />} />

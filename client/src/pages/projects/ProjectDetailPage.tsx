@@ -6,7 +6,7 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { format } from 'date-fns';
 import {
-  Plus, ArrowLeft, Trash2, MessageSquare, Calendar, User, Flag, Send, Shield,
+  Plus, ArrowLeft, Trash2, MessageSquare, Calendar, User, Flag, Send, Shield, LogOut, Tag,
   Paperclip, Upload, Download, FileText, Image as ImageIcon,
 } from 'lucide-react';
 import { projectService } from '../../services/project.service';
@@ -79,11 +79,13 @@ function TaskDetailModal({
   task,
   projectId,
   members,
+  isLead,
   onClose,
 }: {
   task: Task;
   projectId: string;
   members: ProjectMember[];
+  isLead: boolean;
   onClose: () => void;
 }) {
   const qc = useQueryClient();
@@ -169,8 +171,8 @@ function TaskDetailModal({
     : [];
 
   const t = fullTask ?? task;
-  const canEdit = user?.role === 'ADMIN' || user?.role === 'TEAM_LEAD' || user?.id === task.assignedTo || user?.id === task.createdBy;
-  const canChangeStatus = user?.role === 'ADMIN' || user?.role === 'TEAM_LEAD' || user?.id === task.assignedTo;
+  const canEdit = isLead || user?.id === task.assignedTo || user?.id === task.createdBy;
+  const canChangeStatus = isLead || user?.id === task.assignedTo;
 
   return (
     <div className="space-y-5">
@@ -289,7 +291,7 @@ function TaskDetailModal({
                 >
                   <Download className="h-4 w-4" />
                 </button>
-                {(user?.id === att.uploadedBy || user?.role === 'ADMIN' || user?.role === 'TEAM_LEAD') && (
+                {(user?.id === att.uploadedBy || isLead) && (
                   <button
                     onClick={() => { if (confirm('Delete this attachment?')) removeAttachment(att.id); }}
                     title="Delete attachment"
@@ -389,7 +391,7 @@ export function ProjectDetailPage() {
   const qc = useQueryClient();
   const { user } = useAuth();
   const { joinProject, leaveProject, socket } = useSocket();
-  const [tab, setTab] = useState<'board' | 'members' | 'activity'>('board');
+  const [tab, setTab] = useState<'board' | 'members' | 'labels' | 'activity'>('board');
   const [newTaskStatus, setNewTaskStatus] = useState<TaskStatus | null>(null);
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const [addMemberOpen, setAddMemberOpen] = useState(false);
@@ -398,6 +400,9 @@ export function ProjectDetailPage() {
   const [addMemberError, setAddMemberError] = useState<string | null>(null);
   const [selectedLabelIds, setSelectedLabelIds] = useState<string[]>([]);
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [labelName, setLabelName] = useState('');
+  const [labelColor, setLabelColor] = useState('#6366f1');
   const createFileInputRef = useRef<HTMLInputElement>(null);
 
   const pid = projectId!;
@@ -410,13 +415,11 @@ export function ProjectDetailPage() {
   const { data: taskData, isLoading: tasksLoading } = useQuery({
     queryKey: ['tasks', pid],
     queryFn: () => taskService.list(pid, { limit: 100 }),
-    enabled: tab === 'board',
   });
 
   const { data: members = [] } = useQuery({
     queryKey: ['members', pid],
     queryFn: () => projectService.getMembers(pid),
-    enabled: tab === 'members' || tab === 'board',
   });
 
   const { data: activityData } = useQuery({
@@ -432,8 +435,8 @@ export function ProjectDetailPage() {
   });
 
   const { data: allLabels = [] } = useQuery({
-    queryKey: ['labels'],
-    queryFn: () => labelService.list(),
+    queryKey: ['labels', pid],
+    queryFn: () => labelService.list(pid),
   });
 
   // Real-time: join/leave socket room
@@ -492,20 +495,29 @@ export function ProjectDetailPage() {
     setAddMemberError(null);
   };
 
-  const { mutate: addMember, isPending: addingMember } = useMutation({
-    mutationFn: (userId: string) => projectService.addMember(pid, { userId }),
+  // Send an invite from the modal (PENDING membership, no instant access).
+  const { mutate: sendInvite, isPending: inviting } = useMutation({
+    mutationFn: (userId: string) => projectService.sendInvite(pid, { userId }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['members', pid] });
       closeMemberModal();
     },
     onError: (err: unknown) => {
-      setAddMemberError(err instanceof Error ? err.message : 'Failed to add member');
+      setAddMemberError(err instanceof Error ? err.message : 'Failed to send invite');
     },
+  });
+
+  // Re-invite a previously declined member (resets their invite to PENDING).
+  const { mutate: reInvite } = useMutation({
+    mutationFn: (m: ProjectMember) => projectService.sendInvite(pid, { userId: m.userId, role: m.role }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['members', pid] }),
+    onError: (err: unknown) => setActionError(err instanceof Error ? err.message : 'Failed to re-invite'),
   });
 
   const { mutate: removeMember } = useMutation({
     mutationFn: (userId: string) => projectService.removeMember(pid, userId),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['members', pid] }),
+    onError: (err: unknown) => setActionError(err instanceof Error ? err.message : 'Failed to remove member'),
   });
 
   const { mutate: changeMemberRole } = useMutation({
@@ -514,18 +526,50 @@ export function ProjectDetailPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['members', pid] }),
   });
 
+  const { mutate: leaveProjectMut, isPending: leaving } = useMutation({
+    mutationFn: () => projectService.leave(pid),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['projects'] });
+      navigate('/projects');
+    },
+    onError: (err: unknown) => setActionError(err instanceof Error ? err.message : 'Failed to leave project'),
+  });
+
   const { mutate: archiveProject } = useMutation({
     mutationFn: () => projectService.update(pid, { status: 'ARCHIVED' }),
     onSuccess: () => navigate('/projects'),
+  });
+
+  const { mutate: createLabel, isPending: creatingLabel } = useMutation({
+    mutationFn: () => labelService.create(pid, { name: labelName.trim(), color: labelColor }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['labels', pid] });
+      setLabelName('');
+    },
+  });
+
+  const { mutate: deleteLabel } = useMutation({
+    mutationFn: (id: string) => labelService.delete(pid, id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['labels', pid] }),
   });
 
   if (projectLoading) return <PageSpinner />;
   if (!project) return <div className="p-6 text-gray-500">Project not found.</div>;
 
   const tasks = taskData?.tasks ?? [];
-  const canManage = user?.role === 'ADMIN' || user?.role === 'TEAM_LEAD';
+  const myMembership = members.find((m) => m.userId === user?.id);
+  const canManage = myMembership?.role === 'LEAD' && myMembership?.status === 'ACCEPTED';
 
-  // Users not already in project
+  const handleLeave = () => {
+    const myTaskCount = tasks.filter((t) => t.assignedTo === user?.id).length;
+    const msg = myTaskCount > 0
+      ? `You have ${myTaskCount} task(s) assigned to you. Leaving will unassign them. Continue?`
+      : 'Leave this project?';
+    setActionError(null);
+    if (confirm(msg)) leaveProjectMut();
+  };
+
+  // Users not already in project (any status). Declined users are re-invited from the list.
   const existingMemberIds = new Set(members.map((m) => m.userId));
   const availableUsers = searchedUsers.filter((u) => !existingMemberIds.has(u.id));
 
@@ -542,6 +586,9 @@ export function ProjectDetailPage() {
                 Archive
               </Button>
             )}
+            <Button variant="secondary" size="sm" onClick={handleLeave} disabled={leaving}>
+              <LogOut className="h-4 w-4" /> Leave
+            </Button>
             <Button variant="ghost" size="sm" onClick={() => navigate('/projects')}>
               <ArrowLeft className="h-4 w-4" /> Back
             </Button>
@@ -549,10 +596,17 @@ export function ProjectDetailPage() {
         }
       />
 
+      {actionError && (
+        <div className="mx-6 mt-4 rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-600 flex items-center justify-between">
+          <span>{actionError}</span>
+          <button onClick={() => setActionError(null)} className="text-red-400 hover:text-red-600">×</button>
+        </div>
+      )}
+
       {/* Tabs */}
       <div className="border-b border-gray-200 bg-white px-6">
         <div className="flex gap-1">
-          {(['board', 'members', 'activity'] as const).map((t) => (
+          {(['board', 'members', 'labels', 'activity'] as const).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -608,7 +662,7 @@ export function ProjectDetailPage() {
           {canManage && (
             <div className="flex justify-end">
               <Button size="sm" onClick={() => setAddMemberOpen(true)}>
-                <Plus className="h-4 w-4" /> Add Member
+                <Plus className="h-4 w-4" /> Send Invite
               </Button>
             </div>
           )}
@@ -623,10 +677,23 @@ export function ProjectDetailPage() {
                     <p className="text-sm font-medium text-gray-900">{m.user?.name}</p>
                     <p className="text-xs text-gray-400">{m.user?.email}</p>
                   </div>
-                  <Badge variant={m.role === 'LEAD' ? 'TEAM_LEAD' : 'TEAM_MEMBER'}>
-                    {m.role}
-                  </Badge>
-                  {canManage && m.userId !== user?.id && (
+
+                  {m.status === 'ACCEPTED' && <Badge variant={m.role} />}
+                  {m.status === 'PENDING' && (
+                    <span className="text-xs text-amber-600">Invited — awaiting response</span>
+                  )}
+                  {m.status === 'DECLINED' && (
+                    <div className="flex items-center gap-2">
+                      <Badge variant="DECLINED">Declined</Badge>
+                      {canManage && (
+                        <Button size="sm" variant="secondary" onClick={() => reInvite(m)}>
+                          Re-invite
+                        </Button>
+                      )}
+                    </div>
+                  )}
+
+                  {canManage && m.status === 'ACCEPTED' && m.userId !== user?.id && (
                     <div className="flex items-center gap-1 ml-2">
                       <button
                         onClick={() => changeMemberRole({
@@ -657,6 +724,54 @@ export function ProjectDetailPage() {
         </div>
       )}
 
+      {/* Labels — any accepted member can manage (Trello-style) */}
+      {tab === 'labels' && (
+        <div className="p-6 max-w-2xl space-y-4">
+          <form
+            onSubmit={(e) => { e.preventDefault(); if (labelName.trim()) createLabel(); }}
+            className="flex items-end gap-2"
+          >
+            <div className="flex-1">
+              <Input label="New label" placeholder="e.g. Design Review" value={labelName} onChange={(e) => setLabelName(e.target.value)} />
+            </div>
+            <label className="flex flex-col gap-1">
+              <span className="text-sm font-medium text-gray-700">Color</span>
+              <input
+                type="color"
+                value={labelColor}
+                onChange={(e) => setLabelColor(e.target.value)}
+                className="h-9 w-12 cursor-pointer rounded border border-gray-300"
+              />
+            </label>
+            <Button type="submit" isLoading={creatingLabel} disabled={!labelName.trim()}>
+              <Plus className="h-4 w-4" /> Add
+            </Button>
+          </form>
+
+          <div className="rounded-xl border border-gray-200 bg-white divide-y divide-gray-100">
+            {allLabels.length === 0 ? (
+              <p className="px-5 py-6 text-sm text-center text-gray-400">No labels yet</p>
+            ) : (
+              allLabels.map((label) => (
+                <div key={label.id} className="flex items-center gap-3 px-5 py-3">
+                  <span className="h-4 w-4 rounded-full shrink-0" style={{ backgroundColor: label.color }} />
+                  <div className="flex flex-1 items-center gap-2">
+                    <Tag className="h-3.5 w-3.5 text-gray-300" />
+                    <span className="text-sm text-gray-800">{label.name}</span>
+                  </div>
+                  <button
+                    onClick={() => { if (confirm('Delete this label?')) deleteLabel(label.id); }}
+                    className="rounded-md p-1 text-gray-400 hover:bg-red-50 hover:text-red-500 transition-colors"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Activity */}
       {tab === 'activity' && (
         <div className="p-6 max-w-2xl">
@@ -670,7 +785,7 @@ export function ProjectDetailPage() {
                   <div className="flex-1 min-w-0">
                     <p className="text-sm text-gray-700">
                       <span className="font-medium">{log.user?.name}</span>{' '}
-                      {log.action.toLowerCase().replace('_', ' ')} {log.targetType.toLowerCase()}
+                      {log.action.toLowerCase().replace(/_/g, ' ')} {log.targetType.toLowerCase()}
                     </p>
                     <p className="text-xs text-gray-400 mt-0.5">
                       {format(new Date(log.createdAt), 'MMM d, yyyy · h:mm a')}
@@ -715,7 +830,9 @@ export function ProjectDetailPage() {
               label="Assign to"
               options={[
                 { value: '', label: 'Unassigned' },
-                ...members.map((m) => ({ value: m.userId, label: m.user?.name ?? m.userId })),
+                ...members
+                  .filter((m) => m.status === 'ACCEPTED')
+                  .map((m) => ({ value: m.userId, label: m.user?.name ?? m.userId })),
               ]}
               {...register('assignedTo')}
             />
@@ -812,14 +929,18 @@ export function ProjectDetailPage() {
             task={selectedTask}
             projectId={pid}
             members={members}
+            isLead={!!canManage}
             onClose={() => setSelectedTask(null)}
           />
         </Modal>
       )}
 
-      {/* Add member modal */}
-      <Modal isOpen={addMemberOpen} onClose={closeMemberModal} title="Add Member">
+      {/* Send invite modal */}
+      <Modal isOpen={addMemberOpen} onClose={closeMemberModal} title="Send Invite">
         <div className="space-y-3">
+          <p className="text-sm text-gray-500">
+            This sends an invite. The person gets access once they accept it.
+          </p>
           {addMemberError && (
             <div className="rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-600">
               {addMemberError}
@@ -861,7 +982,6 @@ export function ProjectDetailPage() {
                       <p className="text-sm font-medium text-gray-900">{u.name}</p>
                       <p className="text-xs text-gray-400 truncate">{u.email}</p>
                     </div>
-                    <Badge variant={u.role} />
                   </button>
                 );
               })
@@ -873,11 +993,11 @@ export function ProjectDetailPage() {
           <div className="flex justify-end gap-2 pt-1">
             <Button variant="secondary" type="button" onClick={closeMemberModal}>Cancel</Button>
             <Button
-              isLoading={addingMember}
+              isLoading={inviting}
               disabled={!selectedUserId}
-              onClick={() => selectedUserId && addMember(selectedUserId)}
+              onClick={() => selectedUserId && sendInvite(selectedUserId)}
             >
-              Add Member
+              Send Invite
             </Button>
           </div>
         </div>

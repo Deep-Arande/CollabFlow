@@ -62,15 +62,15 @@ export const createComment = asyncHandler(async (req: Request, res: Response) =>
 
 export const updateComment = asyncHandler(async (req: Request, res: Response) => {
   const { taskId, id } = req.params;
-  const { userId, role } = req.user!;
+  const { userId } = req.user!;
   const { content } = req.body;
 
   if (!content?.trim()) return api.error(res, 'Content is required', 400);
 
   const comment = await prisma.comment.findFirst({ where: { id, taskId } });
   if (!comment) return api.error(res, 'Comment not found', 404);
-  if (comment.authorId !== userId && role === 'TEAM_MEMBER') {
-    return api.error(res, 'Forbidden', 403);
+  if (comment.authorId !== userId) {
+    return api.error(res, 'Only the author can edit this comment', 403);
   }
 
   const task = await prisma.task.findUnique({ where: { id: taskId } });
@@ -103,14 +103,22 @@ export const updateComment = asyncHandler(async (req: Request, res: Response) =>
 
 export const deleteComment = asyncHandler(async (req: Request, res: Response) => {
   const { taskId, id } = req.params;
-  const { userId, role } = req.user!;
+  const { userId } = req.user!;
 
   const comment = await prisma.comment.findFirst({ where: { id, taskId } });
   if (!comment) return api.error(res, 'Comment not found', 404);
 
-  const isAuthor = comment.authorId === userId;
-  const canDelete = isAuthor || role === 'ADMIN' || role === 'TEAM_LEAD';
-  if (!canDelete) return api.error(res, 'Forbidden', 403);
+  let canDelete = comment.authorId === userId;
+  if (!canDelete) {
+    const task = await prisma.task.findUnique({ where: { id: taskId } });
+    if (task) {
+      const membership = await prisma.projectMember.findFirst({
+        where: { projectId: task.projectId, userId, status: 'ACCEPTED' },
+      });
+      canDelete = membership?.role === 'LEAD';
+    }
+  }
+  if (!canDelete) return api.error(res, 'Only the author or a project lead can delete this comment', 403);
 
   await prisma.comment.delete({ where: { id } });
   return api.success(res, null, 'Comment deleted');

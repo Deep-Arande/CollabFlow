@@ -1,17 +1,15 @@
-export type Role = 'ADMIN' | 'TEAM_LEAD' | 'TEAM_MEMBER';
 export type ProjectStatus = 'ACTIVE' | 'ARCHIVED';
 export type TaskPriority = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
 export type TaskStatus = 'TODO' | 'IN_PROGRESS' | 'REVIEW' | 'COMPLETED';
-export type ProjectMemberRole = 'LEAD' | 'MEMBER';
+export type ProjectRole = 'LEAD' | 'MEMBER';
+export type InviteStatus = 'PENDING' | 'ACCEPTED' | 'DECLINED';
 
 export interface User {
   id: string;
   name: string;
   email: string;
-  role: Role;
   avatarUrl?: string;
-  isActive: boolean;
-  createdAt: string;
+  createdAt?: string;
 }
 
 export interface Project {
@@ -32,13 +30,28 @@ export interface ProjectMember {
   id: string;
   projectId: string;
   userId: string;
-  role: ProjectMemberRole;
+  role: ProjectRole;
+  status: InviteStatus;
+  invitedBy: string;
   addedAt: string;
+  respondedAt?: string | null;
   user?: User;
+  inviter?: { id: string; name: string; avatarUrl?: string };
+}
+
+export interface PendingInvite {
+  id: string;
+  projectId: string;
+  role: ProjectRole;
+  status: InviteStatus;
+  addedAt: string;
+  project?: { id: string; name: string; description: string };
+  inviter?: { id: string; name: string; avatarUrl?: string };
 }
 
 export interface Label {
   id: string;
+  projectId: string;
   name: string;
   color: string;
 }

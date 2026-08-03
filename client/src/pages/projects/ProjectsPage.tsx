@@ -13,7 +13,6 @@ import { Input } from '../../components/ui/Input';
 import { Modal } from '../../components/ui/Modal';
 import { Badge } from '../../components/ui/Badge';
 import { PageSpinner } from '../../components/ui/Spinner';
-import { useAuth } from '../../context/AuthContext';
 import type { Project } from '../../types';
 
 const schema = z.object({
@@ -62,8 +61,7 @@ export function ProjectsPage() {
   const [open, setOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const qc = useQueryClient();
-  const { user } = useAuth();
-  const canCreate = user?.role === 'ADMIN' || user?.role === 'TEAM_LEAD';
+  const canCreate = true; // any authenticated user can create a project
 
   const { data, isLoading } = useQuery({
     queryKey: ['projects'],
