@@ -3,19 +3,22 @@ import { prisma } from '../services/prisma.service';
 import { asyncHandler } from '../utils/asyncHandler';
 import * as api from '../utils/apiResponse';
 
-const getScopedProjectIds = async (userId: string, role: string): Promise<string[] | undefined> => {
-  if (role === 'ADMIN') return undefined;
-  const memberships = await prisma.projectMember.findMany({ where: { userId }, select: { projectId: true } });
+// Reports are scoped to the projects the user LEADs (accepted memberships).
+const getScopedProjectIds = async (userId: string): Promise<string[]> => {
+  const memberships = await prisma.projectMember.findMany({
+    where: { userId, role: 'LEAD', status: 'ACCEPTED' },
+    select: { projectId: true },
+  });
   return memberships.map((m) => m.projectId);
 };
 
 export const getOverview = asyncHandler(async (req: Request, res: Response) => {
-  const { userId, role } = req.user!;
+  const { userId } = req.user!;
   const { projectId } = req.query as { projectId?: string };
 
-  const projectIds = await getScopedProjectIds(userId, role);
+  const projectIds = await getScopedProjectIds(userId);
   const taskWhere = {
-    ...(projectId ? { projectId } : projectIds ? { projectId: { in: projectIds } } : {}),
+    ...(projectId ? { projectId } : { projectId: { in: projectIds } }),
   };
 
   const now = new Date();
@@ -59,12 +62,12 @@ export const getOverview = asyncHandler(async (req: Request, res: Response) => {
 });
 
 export const getTeamPerformance = asyncHandler(async (req: Request, res: Response) => {
-  const { userId, role } = req.user!;
+  const { userId } = req.user!;
   const { projectId } = req.query as { projectId?: string };
 
-  const projectIds = await getScopedProjectIds(userId, role);
+  const projectIds = await getScopedProjectIds(userId);
   const taskWhere = {
-    ...(projectId ? { projectId } : projectIds ? { projectId: { in: projectIds } } : {}),
+    ...(projectId ? { projectId } : { projectId: { in: projectIds } }),
     assignedTo: { not: null },
   };
 
@@ -95,12 +98,12 @@ export const getTeamPerformance = asyncHandler(async (req: Request, res: Respons
 
 export const exportReport = asyncHandler(async (req: Request, res: Response) => {
   // Returns full report data as JSON. Frontend uses this to generate PDF via jsPDF or similar.
-  const { userId, role } = req.user!;
+  const { userId } = req.user!;
   const { projectId } = req.query as { projectId?: string };
 
-  const projectIds = await getScopedProjectIds(userId, role);
+  const projectIds = await getScopedProjectIds(userId);
   const taskWhere = {
-    ...(projectId ? { projectId } : projectIds ? { projectId: { in: projectIds } } : {}),
+    ...(projectId ? { projectId } : { projectId: { in: projectIds } }),
   };
 
   const [tasks, projects] = await Promise.all([
@@ -113,7 +116,7 @@ export const exportReport = asyncHandler(async (req: Request, res: Response) => 
       orderBy: { createdAt: 'desc' },
     }),
     prisma.project.findMany({
-      where: projectIds ? { id: { in: projectIds } } : {},
+      where: { id: { in: projectIds } },
       include: { _count: { select: { tasks: true, members: true } } },
     }),
   ]);

@@ -1,6 +1,6 @@
-import type { TaskPriority, TaskStatus, ProjectStatus, Role } from '../../types';
+import type { TaskPriority, TaskStatus, ProjectStatus, ProjectRole, InviteStatus } from '../../types';
 
-type BadgeVariant = 'default' | TaskPriority | TaskStatus | ProjectStatus | Role;
+type BadgeVariant = 'default' | TaskPriority | TaskStatus | ProjectStatus | ProjectRole | InviteStatus;
 
 const styles: Record<string, string> = {
   default: 'bg-gray-100 text-gray-700',
@@ -14,15 +14,19 @@ const styles: Record<string, string> = {
   COMPLETED: 'bg-green-100 text-green-700',
   ACTIVE: 'bg-emerald-100 text-emerald-700',
   ARCHIVED: 'bg-gray-100 text-gray-500',
-  ADMIN: 'bg-red-100 text-red-700',
-  TEAM_LEAD: 'bg-indigo-100 text-indigo-700',
-  TEAM_MEMBER: 'bg-gray-100 text-gray-600',
+  // Project-scoped roles
+  LEAD: 'bg-indigo-100 text-indigo-700',
+  MEMBER: 'bg-gray-100 text-gray-600',
+  // Invite statuses
+  PENDING: 'bg-amber-100 text-amber-700',
+  ACCEPTED: 'bg-emerald-100 text-emerald-700',
+  DECLINED: 'bg-rose-100 text-rose-600',
 };
 
 const labels: Record<string, string> = {
   IN_PROGRESS: 'In Progress',
-  TEAM_LEAD: 'Team Lead',
-  TEAM_MEMBER: 'Member',
+  LEAD: 'Lead',
+  MEMBER: 'Member',
 };
 
 interface BadgeProps {

@@ -7,13 +7,11 @@ import { logActivity } from '../utils/activityLogger';
 
 export const listTasks = asyncHandler(async (req: Request, res: Response) => {
   const { projectId } = req.params;
-  const { userId, role } = req.user!;
   const { status, priority, assignedTo, search } = req.query as Record<string, string>;
 
   const tasks = await prisma.task.findMany({
     where: {
       projectId,
-      ...(role === 'TEAM_MEMBER' && { OR: [{ assignedTo: userId }, { createdBy: userId }] }),
       ...(status && { status: status as never }),
       ...(priority && { priority: priority as never }),
       ...(assignedTo && { assignedTo }),
@@ -73,13 +71,11 @@ export const createTask = asyncHandler(async (req: Request, res: Response) => {
 
 export const getTaskById = asyncHandler(async (req: Request, res: Response) => {
   const { projectId, id } = req.params;
-  const { userId, role } = req.user!;
 
   const task = await prisma.task.findFirst({
     where: {
       id,
       projectId,
-      ...(role === 'TEAM_MEMBER' && { OR: [{ assignedTo: userId }, { createdBy: userId }] }),
     },
     include: {
       assignee: { select: { id: true, name: true, avatarUrl: true } },
@@ -148,7 +144,7 @@ export const updateTask = asyncHandler(async (req: Request, res: Response) => {
 
 export const updateTaskStatus = asyncHandler(async (req: Request, res: Response) => {
   const { projectId, id } = req.params;
-  const { userId, role } = req.user!;
+  const { userId } = req.user!;
   const { status } = req.body;
   const io: Server = req.app.get('io');
 
@@ -157,7 +153,8 @@ export const updateTaskStatus = asyncHandler(async (req: Request, res: Response)
   const existing = await prisma.task.findFirst({ where: { id, projectId } });
   if (!existing) return api.error(res, 'Task not found', 404);
 
-  if (role === 'TEAM_MEMBER' && existing.assignedTo !== userId) {
+  // Members may only change the status of tasks assigned to them; Leads can change any.
+  if (req.projectMembership!.role === 'MEMBER' && existing.assignedTo !== userId) {
     return api.error(res, 'You can only update status of tasks assigned to you', 403);
   }
 

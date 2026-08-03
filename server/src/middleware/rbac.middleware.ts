@@ -1,35 +1,57 @@
 import { Request, Response, NextFunction } from 'express';
-import { Role } from '@prisma/client';
 import { prisma } from '../services/prisma.service';
 import { asyncHandler } from '../utils/asyncHandler';
 import * as api from '../utils/apiResponse';
 
-// Blocks anyone whose role is not in the allowed list.
-export const requireRole = (...roles: Role[]) => {
-  return (req: Request, res: Response, next: NextFunction) => {
-    if (!req.user || !roles.includes(req.user.role)) {
-      api.error(res, 'Forbidden', 403);
-      return;
-    }
-    next();
-  };
-};
+// Resolves the project id from whichever route param carries it.
+const resolveProjectId = (req: Request): string | undefined =>
+  req.params.projectId ?? req.params.id;
 
-// Verifies the current user is a member of the project (or Admin).
-// Attaches req.projectMembership for downstream use.
+// Verifies the current user is an ACCEPTED member of the project.
+// Attaches req.projectMembership (incl. project-scoped role) for downstream use.
 export const requireProjectMember = asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
-  const { userId, role } = req.user!;
+  const { userId } = req.user!;
+  const projectId = resolveProjectId(req);
 
-  if (role === 'ADMIN') return next();
+  if (!projectId) {
+    api.error(res, 'Project not specified', 400);
+    return;
+  }
 
-  const projectId = req.params.projectId ?? req.params.id;
-
-  const membership = await prisma.projectMember.findUnique({
-    where: { projectId_userId: { projectId, userId } },
+  const membership = await prisma.projectMember.findFirst({
+    where: { projectId, userId, status: 'ACCEPTED' },
   });
 
   if (!membership) {
-    api.error(res, 'You are not a member of this project', 403);
+    api.error(res, 'Not a member of this project', 403);
+    return;
+  }
+
+  req.projectMembership = membership;
+  next();
+});
+
+// Requires an ACCEPTED membership whose project-scoped role is LEAD.
+export const requireProjectLead = asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
+  const { userId } = req.user!;
+  const projectId = resolveProjectId(req);
+
+  if (!projectId) {
+    api.error(res, 'Project not specified', 400);
+    return;
+  }
+
+  const membership = await prisma.projectMember.findFirst({
+    where: { projectId, userId, status: 'ACCEPTED' },
+  });
+
+  if (!membership) {
+    api.error(res, 'Not a member of this project', 403);
+    return;
+  }
+
+  if (membership.role !== 'LEAD') {
+    api.error(res, 'Only project leads can perform this action', 403);
     return;
   }
 

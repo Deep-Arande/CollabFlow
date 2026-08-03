@@ -6,12 +6,6 @@ datasource db {
   provider = "postgresql"
 }
 
-enum Role {
-  ADMIN
-  TEAM_LEAD
-  TEAM_MEMBER
-}
-
 enum ProjectStatus {
   ACTIVE
   ARCHIVED
@@ -37,9 +31,15 @@ enum FileType {
   DOCX
 }
 
-enum ProjectMemberRole {
+enum ProjectRole {
   LEAD
   MEMBER
+}
+
+enum InviteStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
 }
 
 model User {
@@ -47,13 +47,13 @@ model User {
   name         String
   email        String   @unique
   passwordHash String
-  role         Role     @default(TEAM_MEMBER)
   avatarUrl    String?
   isActive     Boolean  @default(true)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  projects        ProjectMember[]
+  projects        ProjectMember[] @relation("MemberUser")
+  sentInvites     ProjectMember[] @relation("MemberInviter")
   assignedTasks   Task[]          @relation("AssignedTasks")
   createdTasks    Task[]          @relation("CreatedTasks")
   comments        Comment[]
@@ -76,18 +76,23 @@ model Project {
   creator      User          @relation(fields: [createdBy], references: [id])
   members      ProjectMember[]
   tasks        Task[]
+  labels       Label[]
   activityLogs ActivityLog[]
 }
 
 model ProjectMember {
-  id        String            @id @default(uuid())
-  projectId String
-  userId    String
-  role      ProjectMemberRole @default(MEMBER)
-  addedAt   DateTime          @default(now())
+  id          String       @id @default(uuid())
+  projectId   String
+  userId      String
+  role        ProjectRole  @default(MEMBER)
+  status      InviteStatus @default(PENDING)
+  invitedBy   String
+  addedAt     DateTime     @default(now())
+  respondedAt DateTime?
 
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user    User    @relation("MemberUser", fields: [userId], references: [id], onDelete: Cascade)
+  inviter User    @relation("MemberInviter", fields: [invitedBy], references: [id])
 
   @@unique([projectId, userId])
 }
@@ -114,11 +119,13 @@ model Task {
 }
 
 model Label {
-  id    String      @id @default(uuid())
-  name  String
-  color String
+  id        String @id @default(uuid())
+  projectId String
+  name      String
+  color     String
 
-  tasks TaskLabel[]
+  project Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  tasks   TaskLabel[]
 }
 
 model TaskLabel {

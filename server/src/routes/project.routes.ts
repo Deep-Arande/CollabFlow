@@ -10,25 +10,28 @@ import {
   addProjectMember,
   updateProjectMemberRole,
   removeProjectMember,
+  leaveProject,
 } from '../controllers/project.controller';
 import { authenticate } from '../middleware/auth.middleware';
-import { requireRole, requireProjectMember } from '../middleware/rbac.middleware';
+import { requireProjectMember, requireProjectLead } from '../middleware/rbac.middleware';
 
 const router = Router();
 
 router.use(authenticate);
 
 router.get('/', listProjects);
-router.post('/', requireRole('ADMIN', 'TEAM_LEAD'), createProject);
+router.post('/', createProject); // any authenticated user can create a project
 
 router.get('/:id', requireProjectMember, getProjectById);
-router.patch('/:id', requireProjectMember, updateProject);
-router.patch('/:id/archive', requireProjectMember, archiveProject);
-router.delete('/:id', requireProjectMember, deleteProject);
+router.patch('/:id', requireProjectLead, updateProject);
+router.patch('/:id/archive', requireProjectLead, archiveProject);
+router.delete('/:id', requireProjectLead, deleteProject);
+
+router.post('/:id/leave', requireProjectMember, leaveProject);
 
 router.get('/:id/members', requireProjectMember, getProjectMembers);
-router.post('/:id/members', requireProjectMember, addProjectMember);
-router.patch('/:id/members/:userId', requireProjectMember, updateProjectMemberRole);
-router.delete('/:id/members/:userId', requireProjectMember, removeProjectMember);
+router.post('/:id/members', requireProjectLead, addProjectMember);
+router.patch('/:id/members/:userId', requireProjectLead, updateProjectMemberRole);
+router.delete('/:id/members/:userId', requireProjectLead, removeProjectMember);
 
 export default router;

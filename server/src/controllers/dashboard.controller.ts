@@ -4,40 +4,24 @@ import { asyncHandler } from '../utils/asyncHandler';
 import * as api from '../utils/apiResponse';
 
 export const getDashboard = asyncHandler(async (req: Request, res: Response) => {
-  const { userId, role } = req.user!;
+  const { userId } = req.user!;
 
-  // Resolve project scope for non-admins
-  let memberProjectIds: string[] = [];
-  if (role !== 'ADMIN') {
-    const memberships = await prisma.projectMember.findMany({
-      where: { userId },
-      select: { projectId: true },
-    });
-    memberProjectIds = memberships.map((m) => m.projectId);
-  }
+  // Scope everything to the projects the user is an accepted member of.
+  const memberships = await prisma.projectMember.findMany({
+    where: { userId, status: 'ACCEPTED' },
+    select: { projectId: true },
+  });
+  const memberProjectIds = memberships.map((m) => m.projectId);
 
-  // Task scope for aggregate stats
-  const taskScopeWhere =
-    role === 'ADMIN'
-      ? {}
-      : role === 'TEAM_LEAD'
-      ? { projectId: { in: memberProjectIds } }
-      : { assignedTo: userId };
-
-  // Activity scope
-  const activityWhere =
-    role === 'ADMIN'
-      ? {}
-      : role === 'TEAM_LEAD'
-      ? { projectId: { in: memberProjectIds } }
-      : { userId };
+  const taskScopeWhere = { projectId: { in: memberProjectIds } };
+  const activityWhere = { projectId: { in: memberProjectIds } };
 
   const now = new Date();
 
   const [totalProjects, activeTasksCount, completedTasksCount, overdueTasksCount, myTasks, recentActivity] =
     await Promise.all([
       prisma.project.count({
-        where: role === 'ADMIN' ? {} : { members: { some: { userId } } },
+        where: { members: { some: { userId, status: 'ACCEPTED' } } },
       }),
 
       prisma.task.count({
