@@ -23,6 +23,7 @@ export interface Project {
   updatedAt: string;
   creator?: User;
   members?: ProjectMember[];
+  myRole?: ProjectRole | null;
   _count?: { tasks: number; members: number };
 }
 
@@ -96,6 +97,19 @@ export interface Attachment {
   createdAt: string;
   url?: string;
   uploader?: { id: string; name: string };
+}
+
+export interface Mention {
+  id: string;
+  commentId: string;
+  mentionedUserId: string;
+  comment: {
+    id: string;
+    content: string;
+    createdAt: string;
+    author?: User;
+    task: { id: string; title: string; projectId: string };
+  };
 }
 
 export interface ActivityLog {

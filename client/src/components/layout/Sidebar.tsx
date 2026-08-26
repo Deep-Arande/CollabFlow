@@ -4,6 +4,8 @@ import {
   LayoutDashboard,
   FolderKanban,
   Mail,
+  AtSign,
+  BarChart3,
   LogOut,
   Zap,
 } from 'lucide-react';
@@ -25,6 +27,8 @@ export function Sidebar() {
     { to: '/', icon: LayoutDashboard, label: 'Dashboard', end: true, badge: 0 },
     { to: '/projects', icon: FolderKanban, label: 'Projects', end: false, badge: 0 },
     { to: '/invites', icon: Mail, label: 'Invites', end: false, badge: pendingCount },
+    { to: '/mentions', icon: AtSign, label: 'Mentions', end: false, badge: 0 },
+    { to: '/reports', icon: BarChart3, label: 'Reports', end: false, badge: 0 },
   ];
 
   return (

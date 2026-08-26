@@ -3,11 +3,17 @@
 
 ---
 
+## 0. About This Document
+
+This file originally captured pre-build planning decisions. The project has since gone through an **architectural change** (see git history: `architectural-change` branch merge) that replaced the original global-role RBAC model with a project-scoped invite/accept model. This revision brings the document back in line with what `server/prisma/schema.prisma` and the controllers actually implement. Sections that describe superseded designs are marked; the rest still reflects current decisions.
+
+---
+
 ## 1. Project Overview
 
 **Name:** CollabFlow
 **Type:** Team Task & Project Collaboration Portal (full-stack web app)
-**Purpose:** A real-time, role-aware project management tool that gives teams live visibility into who's doing what, so status updates and reporting happen automatically instead of through manual check-ins.
+**Purpose:** A real-time, project-aware task management tool that gives teams live visibility into who's doing what, so status updates and reporting happen automatically instead of through manual check-ins.
 
 ### Problem it solves
 - Task visibility is scattered across tools (Slack, spreadsheets, email)
@@ -15,7 +21,6 @@
 - Collaboration context (comments, files, decisions) gets lost across tools
 - No real-time awareness of changes — everything is "check and refresh"
 - Reporting is manual and after-the-fact
-- Access control is often all-or-nothing on small teams
 
 ### One-line pitch
 "CollabFlow is a real-time project collaboration tool that gives teams live visibility into who's doing what, so status updates and reporting happen automatically instead of through manual check-ins."
@@ -25,206 +30,228 @@ This is being built as a **live interview demo project** — must be deployed, p
 
 ---
 
-## 2. Roles & Scope
+## 2. Access Model — Project-Scoped, No Account Roles
 
-Single-tenant application (one organization = the whole app; no multi-tenant `Organization` table for v1).
+**Superseded:** the original design had a global `User.role` (`ADMIN` / `TEAM_LEAD` / `TEAM_MEMBER`) with an org-wide Admin tier. That was removed. `User` in `schema.prisma` has **no `role` column at all** — every account is the same kind of account.
 
-### 🔴 Admin — org-wide scope
-- Manage users (create/deactivate accounts, assign roles)
-- Create teams (optional feature, see note in schema section)
-- View **org-wide analytics** (across ALL projects/teams — completion rate, team productivity comparison, workload distribution) — exclusive to Admin
-- Create/manage/delete/override any project
-- Access audit logs (full ActivityLog, unfiltered)
+All access control now lives entirely on `ProjectMember`:
 
-### 🟡 Team Lead — project-scoped
-- Create projects (becomes owner)
-- Add members to their project by searching existing users (`ProjectMembers` table)
-- Assign tasks to members within their own project(s)
-- Edit/archive/delete only their own projects
-- View **reports** scoped only to their project(s) — same data shape as Admin analytics but filtered by `projectId IN (their projects)`
-- Cannot see other Leads' projects or org-wide totals
-- Cannot grant Admin-level roles to anyone
+```
+ProjectMember {
+  role:       LEAD | MEMBER          -- this user's role on THIS project only
+  status:     PENDING | ACCEPTED | DECLINED
+  invitedBy:  User.id
+  respondedAt: DateTime?
+}
+```
 
-### 🟢 Team Member — task-scoped
-- View projects they are a member of
-- Update status of tasks assigned to them (Kanban drag & drop)
-- Comment on tasks, @mention other project members
+### 🟡 Project Lead (`role: LEAD` on a given project)
+- Create projects (creator is auto-added as `LEAD`, `status: ACCEPTED`)
+- Edit / archive / delete **that** project
+- Invite members (creates a `PENDING` membership — not instant access), change a member's project role, remove members
+- Create / edit / delete tasks in that project
+- Delete any comment or attachment in that project (not just their own)
+- **Any authenticated user can create a project** — there's no gate on who is "allowed" to become a Lead; you become one by creating or being promoted on a project
+
+### 🟢 Project Member (`role: MEMBER` on a given project)
+- View the project once their membership is `ACCEPTED`
+- Update the status of tasks assigned to them (their board-column-move permission)
+- Comment on tasks, `@mention` other project members, manage labels
 - Upload attachments to tasks
-- View personal dashboard (their tasks, deadlines, recent activity) — no team-wide or org-wide numbers
+- Cannot create/edit/delete tasks, cannot manage other members
 
-**Enforcement model (important architectural decision):**
-Access control is a **two-layer check**, not just `role === 'ADMIN'`:
-1. **Role** — what kind of actions this user type is allowed to perform
-2. **Membership** — which specific projects/resources this particular user has access to (via `ProjectMembers`)
+**A single user can be LEAD on one project and MEMBER on another** — role is per-project, not global. There is no admin account, no org-wide analytics view, and no unfiltered audit log across the whole system.
 
-Analytics/reports use **one query pattern with scope changing by role**, not three separate features:
+### Invite / Accept flow (new — not in the original design)
+Adding someone to a project does not grant access. It creates a `PENDING` `ProjectMember` row. The invited user sees it under `GET /invites/pending` and must respond via `PATCH /invites/:membershipId/respond` with `ACCEPTED` or `DECLINED` before they can see the project. Re-inviting a `DECLINED` user resets the same row back to `PENDING` (no duplicate rows).
+
+### Enforcement model
+Two-layer check, same principle as before but reworked around project scope instead of account role:
+1. **Project role** (`requireProjectLead` middleware) — LEAD-only actions within a project
+2. **Membership** (`requireProjectMember` middleware) — must have an `ACCEPTED` row on the project in the URL at all
+
+"Reports" and "Activity" (the org-facing views) are scoped to **projects the current user leads** — computed the same way for every user, since there's no role to branch on:
+
+```sql
+-- Reports / Activity, for ANY user (no ADMIN/TEAM_LEAD/TEAM_MEMBER branching):
+SELECT ... FROM tasks WHERE projectId IN (
+  SELECT projectId FROM ProjectMember WHERE userId = currentUserId AND role = 'LEAD' AND status = 'ACCEPTED'
+)
 ```
-Admin:      SELECT ... FROM tasks                                    -- no filter
-TeamLead:   SELECT ... FROM tasks WHERE projectId IN (ledProjectIds)
-TeamMember: SELECT ... FROM tasks WHERE assignedUserId = currentUserId
-```
+
+Dashboard is the exception — it's scoped to **all projects the user belongs to** (any role, accepted), plus tasks assigned to them personally. See `api-contract.md` → Dashboard for exact fields.
 
 ---
 
-## 3. Modules / Features (v1 scope — see Section 7 for deferred items)
+## 3. Modules / Features (current state)
 
 1. **Authentication**
-   - Register, Login, JWT + Refresh Token
-   - RBAC middleware (role + project membership checks)
-   - Email verification & forgot/reset password: **deferred to v2** (not built in v1; mention as roadmap item if asked)
+   - Register, Login — JWT only, **no refresh token** (7-day expiry, stateless, no server-side session)
+   - Accounts have no role field
+   - Email verification & forgot/reset password: still deferred
 
-2. **Dashboard** (role-scoped depth per Section 2)
-   - My Tasks / Pending / Completed / Upcoming Deadlines / Recent Activity / Project Progress
-   - Charts: Tasks Completed, Team Productivity, Weekly Progress (Chart.js or Recharts)
+2. **Dashboard**
+   - `totalProjects`, `activeTasks`, `completedTasks`, `overdueTasksCount`, `myTasks`, `recentActivity` — one flat shape for every user
+   - No charts implemented yet (see Section 10)
 
 3. **Projects**
-   - Create / Edit / Archive / Delete
-   - Add members (from existing user list — searchable dropdown sourced from `User` table minus existing `ProjectMembers`)
-   - Description, Due Date
+   - Create / Edit / Archive / Delete (Lead-only past creation)
+   - Invite members by searching existing users → `PENDING` membership → invitee accepts/declines
+   - Change a member's project role, remove a member, leave a project (blocked if sole Lead)
+   - Description, Due Date (required on Project; optional on Task)
 
 4. **Task Management**
-   - Fields: Title, Description, Priority, Status, Due Date, Assigned User, Attachments, Labels
+   - Fields: Title, Description, Priority, Status, Due Date (optional), Assigned User, Attachments, Labels
    - Status flow: Todo → In Progress → Review → Completed
-   - **Kanban board with drag & drop** (core standout feature — must work well for demo)
+   - Status changes go through a dedicated endpoint (`PATCH .../status`) separate from general task edits
+   - **Board UI is implemented as a status-based view driven by a dropdown/modal, not drag-and-drop** — no DnD library (`react-beautiful-dnd`, `@dnd-kit/*`, etc.) is installed in `client/package.json`. If "Kanban drag & drop" is demoed, that's still a build item, not a shipped feature.
+   - Tasks are deep-linkable: `/projects/:projectId/tasks/:taskId` opens the project page with that task's modal already open (same route/component as `/projects/:projectId`, just with an extra param). The task modal's open/closed state is driven by the URL, so opening a task, using browser back, and pasting/sharing a task link all work correctly.
 
 5. **Team Collaboration**
-   - Comments
-   - **@Mentions — implemented WITHOUT a notification layer (see Section 5 for full mechanism)**
-   - Activity Feed (powered by `ActivityLog` table)
+   - Comments — implemented, editable **only by the author** (no Lead override on edit; Lead override only applies to delete)
+   - `@Mentions` — implemented without a notification layer, exactly as originally designed (see Section 5). A "Mentions" inbox page (`/mentions`, `mention.service.ts`) lists everywhere you've been mentioned, newest first, each linking straight to the task via the deep link above — closes what used to be a dead-end backend endpoint (`GET /mentions/me`) with no UI.
+   - Activity Feed (powered by `ActivityLog`)
 
 6. **File Upload**
-   - PDF, Images, DOCX
-   - **Storage: Supabase Storage (private bucket)** — NOT Cloudinary (changed from original plan)
-   - Files accessed via backend-generated **signed URLs**, never public links
+   - PDF, Images (JPEG/PNG/GIF/WEBP), DOCX
+   - Supabase Storage (private bucket), accessed only via backend-generated signed URLs (120s expiry)
+   - Fully implemented, including client-side upload/delete/signed-URL-open (`ProjectDetailPage.tsx` → `TaskDetailModal`)
 
 7. **Reports**
-   - Completed Tasks, Productivity, Team Performance, Delayed Tasks
-   - Export as PDF
+   - Backend endpoints exist (`/reports/overview`, `/reports/team-performance`, `/reports/export`) and are scoped to projects the user leads
+   - `client/src/pages/ReportsPage.tsx` (route `/reports`) consumes all three: stat cards + priority bars, a team performance table, and a JSON export download. No chart or PDF library is installed (`recharts`, `chart.js`, `jspdf`, etc.) — priority breakdown is plain CSS bars, export is raw JSON rather than a formatted PDF.
+   - The project picker on this page only lists projects where the caller's `myRole === 'LEAD'` (see `GET /projects`'s `myRole` field). This matters because the backend endpoints themselves validate `?projectId=` against the caller's led-project list and `403` otherwise — **this validation was missing in an earlier version** and let any authenticated user pull report data for a project they weren't even a member of by passing its id directly (an IDOR). Fixed in `report.controller.ts`'s three handlers; if you're touching that file again, keep the `projectIds.includes(projectId)` check intact.
 
 8. **Real-Time (Socket.io)**
-   - Instant notifications, new comment, task assigned, status changed
-   - This is a key standout/demo feature — should be reliable and clearly demoable (e.g., two tabs open side by side)
+   - `task:created`, `task:assigned`, `task:status_changed`, `comment:new` — all implemented, room-scoped to `project:{projectId}`
+   - Socket join is **not membership-checked server-side** — any authenticated socket can join any project room by id. Fine for a demo, worth knowing before treating it as a security boundary.
+   - No socket event for invites — those are activity-log only
 
 ---
 
-## 4. Database Tables & Relations
+## 4. Database Tables & Relations (matches `server/prisma/schema.prisma`)
 
 ### `User`
 ```
-id            UUID (PK)
+id            String (PK, uuid)
 name          String
 email         String (unique)
 passwordHash  String
-role          Enum (ADMIN, TEAM_LEAD, TEAM_MEMBER)
-avatarUrl     String (optional)
+avatarUrl     String? (optional)
 isActive      Boolean (default true)
 createdAt     DateTime
 updatedAt     DateTime
 ```
+No `role` field. Deactivating a user (`isActive: false`) blocks login, but **there is no API endpoint that sets it** — no admin exists to flip it. It can currently only be changed directly in the database.
 
 ### `Project`
 ```
-id           UUID (PK)
+id           String (PK, uuid)
 name         String
-description  String
-dueDate      DateTime
+description  String (default "")
+dueDate      DateTime            -- required
 status       Enum (ACTIVE, ARCHIVED)
-createdBy    UUID → FK User.id   (owning Team Lead)
+createdBy    String → FK User.id
 createdAt    DateTime
 updatedAt    DateTime
 ```
-*(Note: `Team`/`TeamMembers` tables are OPTIONAL and cut from v1 unless a grouping layer above Projects is specifically wanted — `ProjectMembers` alone covers "who's on this team" for the demo.)*
 
-### `ProjectMembers` (join table — source of "available members to add/invite")
+### `ProjectMember` (join table + invite state machine)
 ```
-id         UUID (PK)
-projectId  UUID → FK Project.id
-userId     UUID → FK User.id
-role       Enum (LEAD, MEMBER)   -- who leads THIS project
-addedAt    DateTime
+id          String (PK, uuid)
+projectId   String → FK Project.id (cascade delete)
+userId      String → FK User.id (cascade delete)
+role        Enum (LEAD, MEMBER)       -- default MEMBER
+status      Enum (PENDING, ACCEPTED, DECLINED)  -- default PENDING
+invitedBy   String → FK User.id
+addedAt     DateTime
+respondedAt DateTime?
+
+@@unique([projectId, userId])   -- one row per (project, user) pair, ever
 ```
+This is the entire access-control surface. There is no separate "Team" or "Invite" table — invite state lives directly on the membership row, and re-inviting a declined user reuses it rather than creating a new one.
 
 ### `Task`
 ```
-id            UUID (PK)
-projectId     UUID → FK Project.id
+id            String (PK, uuid)
+projectId     String → FK Project.id (cascade delete)
 title         String
-description   String
-priority      Enum (LOW, MEDIUM, HIGH, CRITICAL)
-status        Enum (TODO, IN_PROGRESS, REVIEW, COMPLETED)
-dueDate       DateTime
-assignedTo    UUID → FK User.id (nullable)
-createdBy     UUID → FK User.id
+description   String (default "")
+priority      Enum (LOW, MEDIUM, HIGH, CRITICAL)  -- default MEDIUM
+status        Enum (TODO, IN_PROGRESS, REVIEW, COMPLETED)  -- default TODO
+dueDate       DateTime?          -- optional (differs from Project.dueDate)
+assignedTo    String? → FK User.id
+createdBy     String → FK User.id
 createdAt     DateTime
 updatedAt     DateTime
 ```
 
-### `Label` + `TaskLabels` (many-to-many)
+### `Label` + `TaskLabel` (many-to-many, project-scoped)
 ```
 Label:
-id      UUID (PK)
-name    String
-color   String
+id         String (PK, uuid)
+projectId  String → FK Project.id (cascade delete)   -- NOT global
+name       String
+color      String
 
-TaskLabels (junction table):
-taskId   UUID → FK Task.id
-labelId  UUID → FK Label.id
+TaskLabel (junction, composite PK):
+taskId   String → FK Task.id (cascade delete)
+labelId  String → FK Label.id (cascade delete)
 ```
-*Reasoning: labels are reused across many tasks; a junction table avoids duplicating label name/color and keeps renaming/recoloring centralized.*
+**Superseded:** labels were originally planned as global/shared across all projects. They are now created per-project — a "Design" label in Project A is a different row than "Design" in Project B, and any accepted member (not just Leads) can create/edit/delete them.
 
 ### `Comment`
 ```
-id          UUID (PK)
-taskId      UUID → FK Task.id
-authorId    UUID → FK User.id
-content     String   -- raw text, may contain @username inline
-createdAt   DateTime
-updatedAt   DateTime
+id        String (PK, uuid)
+taskId    String → FK Task.id (cascade delete)
+authorId  String → FK User.id
+content   String   -- raw text, may contain @username inline
+createdAt DateTime
+updatedAt DateTime
 ```
 
 ### `CommentMention` (structural @mention tracking — see Section 5)
 ```
-id                UUID (PK)
-commentId         UUID → FK Comment.id
-mentionedUserId   UUID → FK User.id
+id                String (PK, uuid)
+commentId         String → FK Comment.id (cascade delete)
+mentionedUserId   String → FK User.id
 ```
 
 ### `Attachment`
 ```
-id          UUID (PK)
-taskId      UUID → FK Task.id
-uploadedBy  UUID → FK User.id
-filePath    String   -- Supabase Storage path (NOT a public URL)
+id          String (PK, uuid)
+taskId      String → FK Task.id (cascade delete)
+uploadedBy  String → FK User.id
+filePath    String   -- Supabase Storage path, NOT a public URL
 fileType    Enum (PDF, IMAGE, DOCX)
 fileName    String
 createdAt   DateTime
 ```
 
-### `ActivityLog` (event diary — powers Activity Feed + Audit Logs)
+### `ActivityLog` (event diary — powers Activity Feed + Reports scope)
 ```
-id          UUID (PK)
-projectId   UUID → FK Project.id (nullable — some events are org-level)
-userId      UUID → FK User.id   -- who performed the action
-action      String              -- e.g. "TASK_STATUS_CHANGED", "COMMENT_ADDED"
-targetType  String              -- "Task" | "Project" | "Comment"
-targetId    UUID
-metadata    JSONB               -- flexible per-event detail, e.g. {from:"TODO", to:"IN_PROGRESS"}
+id          String (PK, uuid)
+projectId   String? → FK Project.id (nullable)
+userId      String → FK User.id   -- who performed the action
+action      String                -- e.g. "TASK_STATUS_CHANGED", "MEMBER_INVITED"
+targetType  String                -- "Task" | "Project" | "Comment" | "Attachment"
+targetId    String
+metadata    Json (default {})
 createdAt   DateTime
 ```
-*Reasoning for JSONB: different event types carry different extra details (status change needs from/to, comment needs commentId, assignment needs assignedTo). A single flexible metadata column avoids a wide table full of mostly-NULL fixed columns, and new event types never require a schema migration.*
+Written inside the same `prisma.$transaction` as the action it logs, so the log entry and the actual change never go out of sync. See `server/src/utils/activityLogger.ts`.
 
-Should be written inside the same transaction as the action it logs (e.g., `prisma.$transaction([updateTask, createActivityLog])`) so the log entry and the actual change never go out of sync.
-
-### `Notification` — stubbed only, NOT built in v1
-Deferred. When added later, it will be triggered directly off `CommentMention` and `ActivityLog` inserts — no schema rework needed for those two tables to support it.
+### `Notification` — still not built
+Deferred, same as originally planned. `CommentMention` and `ActivityLog` inserts remain the intended trigger source if it's added later.
 
 ### Relations summary
 ```
-User 1—* ProjectMembers *—1 Project
+User 1—* ProjectMember *—1 Project        (role + invite status live here)
 Project 1—* Task
+Project 1—* Label
 Task 1—* Comment
 Task 1—* Attachment
-Task *—* Label (via TaskLabels)
+Task *—* Label (via TaskLabel)
 Comment 1—* CommentMention *—1 User
 User 1—* ActivityLog (as actor)
 ```
@@ -233,148 +260,164 @@ User 1—* ActivityLog (as actor)
 
 ## 5. @Mentions — Implementation Without Notifications
 
-**Goal:** working, visible @mentions with zero dependency on a notification system.
+Unchanged from the original design and matches the code:
 
-1. **Frontend:** while typing a comment, detect `@` + characters, show dropdown of matching `ProjectMembers` for that task's project.
-2. **On submit:** save raw text in `Comment.content`. Parse text for `@username` matches and create one `CommentMention` row per matched user (structural FK relationship, not just string matching).
-3. **On display:** render comments by replacing `@username` substrings with a styled chip, matched against that comment's real `CommentMention` records (accurate even with similar usernames).
-4. **"Mentions of me" view (notification substitute for now):**
-   ```sql
-   SELECT * FROM CommentMention
-   JOIN Comment ON ...
-   WHERE mentionedUserId = currentUser.id
-   ORDER BY comment.createdAt DESC
-   ```
-   Gives users a real, functional way to check who tagged them — not real-time, but fully working.
-5. **Future extension path:** when notifications are added later, `CommentMention` inserts become the trigger source for both a `Notification` row and a Socket.io emit — no schema changes needed.
+1. **Frontend:** while typing a comment, detect `@` + characters, show a dropdown of matching project members.
+2. **On submit:** save raw text in `Comment.content`. Parse for `@username` matches against the task's `ProjectMember` list and create one `CommentMention` row per match.
+3. **On display:** render comments by replacing `@username` substrings with a styled chip, matched against that comment's real `CommentMention` records.
+4. **"Mentions of me" view** (notification substitute): `GET /mentions/me` — join `CommentMention` → `Comment` → `Task`, filtered by `mentionedUserId = currentUser.id`, newest first, capped at 50.
+5. **Future extension path:** unchanged — `CommentMention` inserts become the trigger source for a `Notification` row + Socket.io emit if/when built.
 
 ---
 
 ## 6. File Storage — Supabase Storage (Private Bucket)
 
-**Decision:** Use Supabase Storage instead of Cloudinary. Bucket name suggestion: `attachments`, set to **private**.
+Unchanged from the original design and fully implemented, both server and client side.
 
 ### Upload flow
-1. User selects file in browser → sent to Express backend (multipart/form-data), not directly to Supabase.
-2. Backend uploads to Supabase Storage using the **service role key** (server-side only — never exposed to frontend).
-3. Suggested path structure:
-   ```
-   attachments/project-{projectId}/task-{taskId}/{uuid}-{originalFileName}
-   ```
-4. Supabase returns a storage path (not a public URL) → save in `Attachment.filePath`.
+1. Browser sends file to Express backend (multipart/form-data via `multer`, memory storage, 10 MB limit).
+2. Backend uploads to Supabase Storage using the **service role key** (server-side only, in `server/.env` as `SUPABASE_SERVICE_KEY` — never exposed to the frontend).
+3. Path structure actually used: `project-{projectId}/task-{taskId}/{uuid}.{ext}` (original doc suggested prefixing the bucket name and original filename — the shipped version doesn't keep the original filename in the path, only in `Attachment.fileName`).
+4. Supabase returns a storage path (not a public URL) → saved in `Attachment.filePath`.
 
 ### Access/view flow (RBAC-gated)
-1. Frontend requests: `GET /api/tasks/:taskId/attachments/:attachmentId`
-2. Backend checks: is this user a member of the project this task belongs to (via `ProjectMembers`), or Admin?
-3. If authorized → backend asks Supabase to generate a **signed URL** (short expiry, e.g. 60–120 seconds) → returns it to frontend, which loads/downloads directly from Supabase using that temporary link.
-4. If not authorized → 403, no signed URL ever generated.
+1. Frontend requests `GET /api/tasks/:taskId/attachments/:id/url`.
+2. Backend checks the caller has an `ACCEPTED` `ProjectMember` row on the task's project.
+3. If authorized → backend asks Supabase for a signed URL (**120s** expiry, not the original 60–120s range — it's fixed at 120) → returned to frontend.
+4. If not authorized → `403`, no signed URL ever generated.
 
-**Key security point:** the permission check happens on the Express backend, not on Supabase or the frontend. Supabase only knows "give signed URLs to whoever holds the service key and asks" — your backend is the sole gatekeeper deciding who's allowed to ask.
+**Key security point (unchanged):** the permission check happens on the Express backend, never on Supabase or the frontend.
 
 ---
 
-## 7. Deferred to v2 (explicitly out of scope for v1 build)
+## 7. Deferred / Not Yet Built
 
 - Email verification & forgot/reset password flow
-- Notification system (real-time toast/bell notifications) — `CommentMention` + `ActivityLog` already lay the groundwork
+- Notification system (real-time toast/bell) — `CommentMention` + `ActivityLog` already lay the groundwork
 - Calendar module (deadlines/meetings/milestones view)
-- AI Features — ALL deferred for now (AI Task Generator, AI Comment Summary, AI Weekly Report, AI Priority Suggestion). Priority field remains a plain manual dropdown (Low/Medium/High/Critical) for v1. Adding AI later = one new endpoint (`POST /api/ai/suggest-priority`) calling an LLM API — no schema rework needed.
-- `Team`/`TeamMembers` grouping layer above Projects (optional, cut unless specifically needed)
-- Multi-tenant `Organization` table (single-tenant is sufficient for demo; mention as extension path if asked)
+- AI Features — all deferred (AI Task Generator, AI Comment Summary, AI Weekly Report, AI Priority Suggestion). Priority remains a plain manual dropdown.
+- Multi-tenant `Organization` table — still N/A; access control is per-project now anyway, so this would layer on top rather than replace anything
+- **Charts and PDF export** — the Reports page (see Section 3.7) now covers overview/team-performance/export, but with plain CSS bars and raw-JSON export, not a chart library or a formatted PDF
+- **True Kanban drag-and-drop** — status changes work via API/UI action, not drag gestures (see Section 3.4)
+- A user-facing way to reactivate/deactivate accounts (`isActive` has no endpoint at all now that there's no admin role)
 
 ---
 
 ## 8. Tech Stack
 
 ### Frontend
-- React + TypeScript
+- React + TypeScript, Vite
 - Tailwind CSS
-- React Router
-- React Query (TanStack Query)
+- React Router (`react-router-dom` v6)
+- TanStack Query (`@tanstack/react-query`)
 - React Hook Form + Zod
-- Chart.js or Recharts
+- `date-fns`, `axios`, `lucide-react`, `socket.io-client`
+- **No chart library and no drag-and-drop library installed yet** (see Section 7)
 
 ### Backend
-- Node.js + Express.js (TypeScript — `ts-node-dev` for dev, `tsc` build for production)
-- PostgreSQL via **Supabase** (changed from Neon)
+- Node.js + Express.js (TypeScript)
+- PostgreSQL via **Supabase**
 - Prisma ORM
-- JWT Authentication + Bcrypt
+- JWT (`jsonwebtoken`) + Bcrypt (`bcryptjs`) — custom auth, no refresh tokens
 - Socket.io (real-time: task status changes, comments, task assignment)
+- `multer` (memory storage) for uploads
 
 ### Storage
-- **Supabase Storage** (private bucket, signed URLs) — replaces Cloudinary
+- **Supabase Storage** (private bucket, signed URLs)
 
 ### Deployment
 - Frontend → **Vercel**
-- Backend → **Railway** (chosen over Render specifically because it handles persistent Socket.io/WebSocket connections more reliably and doesn't aggressively sleep on free tier the way Render does)
+- Backend → **Railway** (chosen for reliable persistent Socket.io/WebSocket support vs. Render's free-tier sleep behavior)
 - Database → **Supabase** (Postgres)
 
 ### Supabase connection notes for Prisma
-- Use the **pooled connection string** (port 6543, `?pgbouncer=true`) for the app's runtime `DATABASE_URL`
-- Use the **direct connection string** (port 5432) for `prisma migrate` operations
-- Keep Supabase's own Auth/Storage-as-auth-service unused — **custom JWT/Bcrypt auth is intentionally kept** rather than swapped for Supabase Auth, since building auth manually is a stronger technical talking point for this project. Supabase is used purely as Postgres host + file storage.
+- Pooled connection string (port 6543, `?pgbouncer=true`) for the app's runtime `DATABASE_URL`
+- Direct connection string (port 5432) for `prisma migrate` operations, as `DIRECT_URL`
+- `schema.prisma`'s `datasource db` block in this repo does **not** currently declare `directUrl` — only `provider = "postgresql"` is set, with the URL supplied via `DATABASE_URL` env var at the Prisma Client level. If `prisma migrate` needs the direct (non-pooled) connection, confirm `DIRECT_URL` is wired before relying on it.
+- Supabase's own Auth is intentionally unused — custom JWT/Bcrypt auth is kept as a technical talking point. Supabase is Postgres host + file storage only.
 
 ---
 
-## 9. Folder Structure
+## 9. Folder Structure (actual)
 
 ```
 client/
- ├── components/
- ├── pages/
- ├── hooks/
- ├── services/
- ├── context/
- ├── layouts/
- └── utils/
+ └── src/
+     ├── components/
+     │   ├── layout/       (Header, Sidebar)
+     │   └── ui/            (Avatar, Badge, Button, Input, Modal, Select, Spinner)
+     ├── config/            (api.ts — axios instance)
+     ├── context/           (AuthContext, SocketContext)
+     ├── layouts/           (AppLayout, AuthLayout)
+     ├── pages/
+     │   ├── auth/           (LoginPage, RegisterPage)
+     │   ├── invites/        (InvitesPage)
+     │   ├── mentions/       (MentionsPage — "who @mentioned me", links to the deep-linked task route)
+     │   ├── projects/       (ProjectsPage, ProjectDetailPage — includes Kanban-style task board, TaskDetailModal with comments/attachments/labels, reachable directly via /projects/:projectId/tasks/:taskId)
+     │   ├── DashboardPage.tsx
+     │   └── ReportsPage.tsx (Lead-only report view — stat cards, priority bars, team performance table, JSON export)
+     ├── services/          (one per resource: auth, user, invite, project, task, label, comment, attachment, activity, dashboard, mention, report)
+     └── types/index.ts     (single source of truth for shared TS types — matches Prisma schema closely)
 
 server/
- ├── src/
- │   ├── controllers/
- │   ├── routes/
- │   ├── middleware/
- │   ├── prisma/
- │   ├── services/
- │   ├── sockets/
- │   ├── utils/
- │   └── config/
+ └── src/
+     ├── controllers/       (one per resource, incl. invite.controller.ts)
+     ├── routes/
+     ├── middleware/        (auth.middleware, rbac.middleware, upload.middleware)
+     ├── services/          (prisma.service, storage.service, token.service)
+     ├── sockets/
+     ├── utils/             (apiResponse, asyncHandler, activityLogger, parseMentions)
+     ├── config/            (env.ts)
+     └── types.ts           (Express.Request augmentation: req.user, req.projectMembership)
+
+server/prisma/
+ ├── schema.prisma
+ └── migrations/
 ```
+
+Note: there is no `reports` service/page on the client yet, matching Section 7.
 
 ---
 
-## 10. Extra "Stand Out" Features (nice-to-have, lower priority than core)
-- Dark Mode
-- Search & Filters
-- Activity Timeline (same data as ActivityLog, presented as a feed)
-- Audit Logs (Admin-only, unfiltered ActivityLog view)
-- Responsive Design
-- Pagination
-- Toast Notifications (UI-only toasts for local actions — distinct from the deferred real-time notification system)
-- Keyboard Shortcuts (e.g. `N` = new task)
-- Export Reports (PDF/CSV)
+## 10. Extra "Stand Out" Features (status)
+
+| Feature | Status |
+|---|---|
+| Dark Mode | Not confirmed implemented — check `Header`/theme context if needed |
+| Search & Filters | Implemented for tasks (`status`, `priority`, `assignedTo`, `search` query params) and users (`/users/search`) |
+| Activity Timeline | Implemented (`ActivityLog` + `/activity` endpoints) |
+| Audit Logs | Endpoint exists (`/activity/audit`) but currently identical in scope to `/activity` — not a true unfiltered/org-wide view (no admin concept to grant one) |
+| Responsive Design | Tailwind-based, not verified here |
+| Pagination | Implemented on `/activity`, `/activity/audit`, `/activity/project/:id` (`page`/`limit`); not on `/projects` or `/tasks` list endpoints |
+| Toast Notifications | Not confirmed — check `components/ui` |
+| Keyboard Shortcuts | Not confirmed implemented |
+| Export Reports (PDF/CSV) | Implemented as raw JSON download from the Reports page (`/reports/export`); no PDF/CSV formatting |
+| Mentions Inbox | Implemented (`/mentions`) — was previously a backend-only endpoint with no UI |
 
 ---
 
 ## 11. Demo-Readiness Checklist (interview-specific requirements)
-1. **Seed data script** — 2–3 users per role, 2–3 projects, 15–20 tasks across different statuses, some comments/mentions/attachments. An empty app is a bad demo.
-2. **Handle Railway cold starts** — check current sleep/spin-down behavior before the interview; consider a keep-alive ping or paid tier if needed.
-3. **Loading states + error boundaries** on every fetch — no blank white screens.
-4. **Rehearsed demo script**, e.g.: login as Lead → create task → assign → switch tab, login as Member → see notification arrive in real time → drag task across Kanban → comment with @mention → dashboard updates live.
-5. **README with architecture overview** — schema diagram, auth flow explanation, rationale for Socket.io vs polling, RBAC two-layer check explanation.
+
+1. **Seed data script** — check whether one exists under `server/prisma/` before assuming it's ready; needs users, projects with mixed membership status (some `PENDING` invites are a good demo of that flow), tasks across statuses, comments/mentions/attachments.
+2. **Handle Railway cold starts** — check current sleep/spin-down behavior before the interview.
+3. **Loading states + error boundaries** on every fetch.
+4. **Rehearsed demo script** should now route around the invite flow, e.g.: create project as User A (becomes Lead) → invite User B → log in as User B, accept invite in `/invites` → assign a task to User B → switch tabs to see `task:assigned`/`task:status_changed` in real time → comment with `@mention`.
+5. **README with architecture overview** — the current `README.md` at the repo root still describes the old global-role model (`ADMIN`/`TEAM_LEAD`/`TEAM_MEMBER`, refresh tokens, admin analytics). It was **not** updated as part of this pass — flag it as a follow-up if the README needs to match this document and `api-contract.md`.
 
 ---
 
-## 12. Suggested Build Order
-1. Auth (register/login/JWT/refresh, skip email verification) + RBAC middleware
-2. Prisma schema + Supabase connection + Projects/Tasks CRUD (basic list view, no drag-drop yet)
-3. Kanban board with drag & drop
-4. Socket.io real-time (status change, comments) — auth-aware socket handshake, not just REST auth
-5. Dashboard + charts (now real data exists)
+## 12. Suggested Build Order (historical — kept for reference)
+
+1. Auth (register/login/JWT, no refresh) + project-scoped RBAC middleware
+2. Prisma schema + Supabase connection + Projects/Tasks CRUD
+3. Board UI for task status
+4. Socket.io real-time (status change, comments, assignment)
+5. Dashboard
 6. File uploads via Supabase Storage (signed URL flow)
-7. Reports + PDF export
+7. Reports backend + frontend, Mentions inbox, deep-linkable tasks (see Section 3)
 8. Polish: dark mode, keyboard shortcuts, search/filters, pagination
-9. (Future) Notifications, Calendar, AI features
+9. (Future) Notifications, Calendar, AI features, true drag-and-drop Kanban, charts/PDF export
 
 ---
 
-*This document reflects all decisions made through project planning discussion as of the current session. Any new decisions should be appended here to keep a single source of truth for the AI coding agent.*
+*This document was reconciled against the actual server implementation (`schema.prisma`, all controllers/routes/middleware) and the client (`types/index.ts`, services, `App.tsx` routes) as of this revision. Any new decisions should be appended here to keep a single source of truth.*

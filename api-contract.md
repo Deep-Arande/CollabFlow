@@ -10,16 +10,17 @@ Complete reference for all REST endpoints and Socket.io events.
 2. [Authentication](#authentication)
 3. [Common Response Format](#common-response-format)
 4. [Error Codes](#error-codes)
-5. [Roles & Access Levels](#roles--access-levels)
+5. [Access Model](#access-model)
 6. [Endpoints](#endpoints)
    - [Auth](#auth)
    - [Users](#users)
+   - [Invites](#invites)
    - [Projects](#projects)
    - [Tasks](#tasks)
+   - [Labels](#labels)
    - [Comments](#comments)
    - [Mentions](#mentions)
    - [Attachments](#attachments)
-   - [Labels](#labels)
    - [Dashboard](#dashboard)
    - [Activity](#activity)
    - [Reports](#reports)
@@ -47,8 +48,9 @@ Authorization: Bearer <token>
 ```
 
 - Token is returned on `POST /auth/register` and `POST /auth/login`
-- Token expiry: **7 days**
-- On expiry the client must re-login (no refresh token flow)
+- Token payload is just `{ userId }` — there is no account-level role in the token or anywhere else
+- Token expiry: **7 days**, stateless (no server-side session/blacklist)
+- On expiry the client must re-login — **there is no refresh token endpoint**, despite what older planning docs say
 
 ---
 
@@ -75,7 +77,7 @@ Every response follows this envelope:
 }
 ```
 
-**Error example:**
+**Error example** (note: error responses have no `data` key at all, not even `null`):
 ```json
 {
   "success": false,
@@ -91,25 +93,36 @@ Every response follows this envelope:
 |---|---|
 | 400 | Bad request — missing or invalid fields |
 | 401 | Unauthorized — missing, invalid, or expired token |
-| 403 | Forbidden — authenticated but lacks role or project membership |
+| 403 | Forbidden — authenticated but lacks project role or membership |
 | 404 | Resource not found |
-| 409 | Conflict — e.g. duplicate email or existing project member |
+| 409 | Conflict — e.g. duplicate email, pending invite already exists |
 | 500 | Internal server error |
 
 ---
 
-## Roles & Access Levels
+## Access Model
 
-| Role | Label | Scope |
-|---|---|---|
-| `ADMIN` | Admin | Org-wide — all projects, all users, all analytics |
-| `TEAM_LEAD` | Team Lead | Project-scoped — only projects they created or are a member of |
-| `TEAM_MEMBER` | Member | Task-scoped — only tasks assigned to them within their projects |
+**There is no account-level role.** `User` has no `role` column — every user is the same "kind" of account. All access control is **project-scoped**, driven entirely by `ProjectMember`:
+
+```
+ProjectMember {
+  role:   LEAD | MEMBER        -- this user's role on THIS project
+  status: PENDING | ACCEPTED | DECLINED
+}
+```
+
+- **LEAD** — can edit/archive/delete the project, create/edit/delete tasks, manage members (invite, change role, remove), manage labels
+- **MEMBER** — can view the project, update the status of tasks assigned to them, comment, attach files, manage labels
+- Only `ACCEPTED` memberships count as active access. `PENDING` = invited but not yet responded; `DECLINED` = user rejected the invite.
+- A user can be LEAD on one project and MEMBER on another — role is per-project, not global.
+- There is no admin/super-user account and no org-wide view. "Reports" and "Activity" are scoped to **projects the current user leads** (see those sections) — not to all projects in the system.
 
 Shorthand used in this document:
-- **[Auth]** — any authenticated user (any role)
-- **[Lead+]** — `TEAM_LEAD` or `ADMIN`
-- **[Admin]** — `ADMIN` only
+- **[Auth]** — any authenticated user, no project relationship required
+- **[Member]** — authenticated + `ACCEPTED` `ProjectMember` on the project in the URL
+- **[Lead]** — authenticated + `ACCEPTED` `ProjectMember` with `role: LEAD` on the project in the URL
+
+These are enforced by `requireProjectMember` / `requireProjectLead` middleware (`server/src/middleware/rbac.middleware.ts`), which reads `projectId` from either `:projectId` or `:id` in the route params.
 
 ---
 
@@ -130,8 +143,7 @@ Create a new user account.
 {
   "name": "Alice Johnson",
   "email": "alice@example.com",
-  "password": "securepassword123",
-  "role": "TEAM_MEMBER"
+  "password": "securepassword123"
 }
 ```
 
@@ -140,7 +152,8 @@ Create a new user account.
 | `name` | string | Yes | |
 | `email` | string | Yes | Must be unique |
 | `password` | string | Yes | Hashed with bcrypt (12 rounds) |
-| `role` | enum | No | `ADMIN`, `TEAM_LEAD`, `TEAM_MEMBER` — defaults to `TEAM_MEMBER` |
+
+There is no `role` field — accounts have no role.
 
 **Response `201`:**
 ```json
@@ -152,7 +165,7 @@ Create a new user account.
       "id": "d290f1ee-6c54-4b01-90e6-d701748f0851",
       "name": "Alice Johnson",
       "email": "alice@example.com",
-      "role": "TEAM_MEMBER",
+      "avatarUrl": null,
       "createdAt": "2024-01-15T10:00:00.000Z"
     },
     "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
@@ -190,7 +203,6 @@ Authenticate and receive a JWT.
       "id": "d290f1ee-6c54-4b01-90e6-d701748f0851",
       "name": "Alice Johnson",
       "email": "alice@example.com",
-      "role": "TEAM_MEMBER",
       "avatarUrl": null
     },
     "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
@@ -200,25 +212,19 @@ Authenticate and receive a JWT.
 
 **Errors:**
 - `400` — email or password missing
-- `401` — invalid credentials or deactivated account
+- `401` — invalid credentials or deactivated account (`isActive: false`)
 
 ---
 
 #### `POST /auth/logout`
 
-Invalidate the current session. Client should discard the token.
+Stateless no-op. Client should discard the token — there is nothing to invalidate server-side.
 
 **Auth required:** [Auth]
 
-**Request body:** None
-
 **Response `200`:**
 ```json
-{
-  "success": true,
-  "message": "Logged out",
-  "data": null
-}
+{ "success": true, "message": "Logged out", "data": null }
 ```
 
 ---
@@ -239,7 +245,6 @@ Get the currently authenticated user's profile.
       "id": "d290f1ee-6c54-4b01-90e6-d701748f0851",
       "name": "Alice Johnson",
       "email": "alice@example.com",
-      "role": "TEAM_MEMBER",
       "avatarUrl": null,
       "createdAt": "2024-01-15T10:00:00.000Z"
     }
@@ -251,56 +256,19 @@ Get the currently authenticated user's profile.
 
 ### Users
 
-#### `GET /users`
-
-List all users with optional search and pagination.
-
-**Auth required:** [Admin]
-
-**Query params:**
-
-| Param | Type | Default | Description |
-|---|---|---|---|
-| `page` | number | `1` | Page number |
-| `limit` | number | `20` | Results per page |
-| `search` | string | — | Filter by name or email (case-insensitive) |
-
-**Response `200`:**
-```json
-{
-  "success": true,
-  "message": "Success",
-  "data": {
-    "users": [
-      {
-        "id": "uuid",
-        "name": "Alice Johnson",
-        "email": "alice@example.com",
-        "role": "TEAM_MEMBER",
-        "isActive": true,
-        "createdAt": "2024-01-15T10:00:00.000Z"
-      }
-    ],
-    "total": 42,
-    "page": 1,
-    "limit": 20
-  }
-}
-```
-
----
+There is no admin-facing "list all users" endpoint and no user deactivation endpoint. User management beyond self-profile does not exist in the API.
 
 #### `GET /users/search`
 
-Search users by name or email. Used when adding members to a project.
+Search active users by name or email. Used by the invite-to-project flow.
 
-**Auth required:** [Lead+]
+**Auth required:** [Auth]
 
 **Query params:**
 
 | Param | Type | Required | Description |
 |---|---|---|---|
-| `q` | string | Yes | Search term (name or email) |
+| `q` | string | No | Search term (name or email). Empty/missing `q` returns `{ users: [] }`. |
 
 **Response `200`:**
 ```json
@@ -309,27 +277,21 @@ Search users by name or email. Used when adding members to a project.
   "message": "Success",
   "data": {
     "users": [
-      {
-        "id": "uuid",
-        "name": "Bob Smith",
-        "email": "bob@example.com",
-        "role": "TEAM_MEMBER",
-        "avatarUrl": null
-      }
+      { "id": "uuid", "name": "Bob Smith", "email": "bob@example.com", "avatarUrl": null }
     ]
   }
 }
 ```
 
-Returns up to 10 results. Only returns `isActive: true` users.
+Returns up to 20 results, only `isActive: true` users, ordered by name.
 
 ---
 
 #### `GET /users/:id`
 
-Get a single user's details.
+Get a single user's public profile.
 
-**Auth required:** [Admin]
+**Auth required:** [Auth]
 
 **Response `200`:**
 ```json
@@ -341,8 +303,6 @@ Get a single user's details.
       "id": "uuid",
       "name": "Bob Smith",
       "email": "bob@example.com",
-      "role": "TEAM_MEMBER",
-      "isActive": true,
       "avatarUrl": null,
       "createdAt": "2024-01-15T10:00:00.000Z"
     }
@@ -357,19 +317,36 @@ Get a single user's details.
 
 #### `PATCH /users/:id`
 
-Update a user's name or role.
+Update your own name or avatar. **You can only update your own profile** — there is no admin override.
 
-**Auth required:** [Admin]
+**Auth required:** [Auth]; `:id` must equal the caller's own `userId`
 
 **Request body:**
 ```json
 {
   "name": "Robert Smith",
-  "role": "TEAM_LEAD"
+  "avatarUrl": "https://..."
 }
 ```
 
-All fields optional — only provided fields are updated.
+All fields optional.
+
+**Response `200`:** Returns the updated `{ id, name, email, avatarUrl }`.
+
+**Errors:**
+- `403` — `:id` does not match the authenticated user
+
+---
+
+### Invites
+
+Adding someone to a project does **not** grant instant access — it creates a `PENDING` `ProjectMember` row that the invited user must accept. This is a distinct sub-flow from `POST /projects/:id/members` (see [Projects](#projects)), which is how invites are *sent*.
+
+#### `GET /invites/pending`
+
+List invites awaiting the current user's response.
+
+**Auth required:** [Auth]
 
 **Response `200`:**
 ```json
@@ -377,42 +354,44 @@ All fields optional — only provided fields are updated.
   "success": true,
   "message": "Success",
   "data": {
-    "user": {
-      "id": "uuid",
-      "name": "Robert Smith",
-      "email": "bob@example.com",
-      "role": "TEAM_LEAD",
-      "isActive": true
-    }
+    "invites": [
+      {
+        "id": "uuid",
+        "projectId": "uuid",
+        "role": "MEMBER",
+        "status": "PENDING",
+        "addedAt": "2024-01-15T10:00:00.000Z",
+        "project": { "id": "uuid", "name": "Website Redesign", "description": "..." },
+        "inviter": { "id": "uuid", "name": "Alice Johnson", "avatarUrl": null }
+      }
+    ]
   }
 }
 ```
 
 ---
 
-#### `PATCH /users/:id/deactivate`
+#### `PATCH /invites/:membershipId/respond`
 
-Deactivate a user account. Deactivated users cannot log in.
+Accept or decline an invite. `:membershipId` is the `ProjectMember.id`.
 
-**Auth required:** [Admin]
+**Auth required:** [Auth]; only the invited user may respond
 
-**Request body:** None
-
-**Response `200`:**
+**Request body:**
 ```json
-{
-  "success": true,
-  "message": "User deactivated",
-  "data": {
-    "user": {
-      "id": "uuid",
-      "name": "Bob Smith",
-      "email": "bob@example.com",
-      "isActive": false
-    }
-  }
-}
+{ "response": "ACCEPTED" }
 ```
+
+`response` must be `"ACCEPTED"` or `"DECLINED"`.
+
+**Response `200`:** Returns the updated membership row (`status`, `respondedAt` set).
+
+**Errors:**
+- `400` — `response` is not `ACCEPTED`/`DECLINED`, or the invite was already answered
+- `403` — the invite is not addressed to the caller
+- `404` — invite not found
+
+**Side effects:** Writes `ActivityLog` entry with `action: INVITE_ACCEPTED` or `INVITE_DECLINED`
 
 ---
 
@@ -420,13 +399,9 @@ Deactivate a user account. Deactivated users cannot log in.
 
 #### `GET /projects`
 
-List all projects scoped to the current user's role.
+List projects where the current user has an `ACCEPTED` membership (any role). There is no org-wide "all projects" view for anyone.
 
 **Auth required:** [Auth]
-
-**Scope behavior:**
-- `ADMIN` — returns all projects
-- `TEAM_LEAD` / `TEAM_MEMBER` — returns only projects where they are in `ProjectMembers`
 
 **Response `200`:**
 ```json
@@ -445,6 +420,7 @@ List all projects scoped to the current user's role.
         "createdAt": "2024-01-15T10:00:00.000Z",
         "updatedAt": "2024-01-15T10:00:00.000Z",
         "creator": { "id": "uuid", "name": "Alice Johnson" },
+        "myRole": "LEAD",
         "_count": { "tasks": 12, "members": 4 }
       }
     ]
@@ -452,13 +428,15 @@ List all projects scoped to the current user's role.
 }
 ```
 
+`myRole` is the caller's own project-scoped role (`LEAD` or `MEMBER`) — added so clients can distinguish "projects I lead" from "projects I'm just a member of" without an extra request per project (e.g. used to filter the project picker on the Reports page to only projects the user leads).
+
 ---
 
 #### `POST /projects`
 
-Create a new project. The creator is automatically added as a project member with role `LEAD`.
+Create a new project. **Any authenticated user can create a project** (no gating role). The creator is automatically added as an `ACCEPTED` `ProjectMember` with `role: LEAD`.
 
-**Auth required:** [Lead+]
+**Auth required:** [Auth]
 
 **Request body:**
 ```json
@@ -473,31 +451,16 @@ Create a new project. The creator is automatically added as a project member wit
 |---|---|---|
 | `name` | string | Yes |
 | `dueDate` | ISO date string | Yes |
-| `description` | string | No |
+| `description` | string | No — defaults to `""` |
 
-**Response `201`:**
-```json
-{
-  "success": true,
-  "message": "Project created",
-  "data": {
-    "project": {
-      "id": "uuid",
-      "name": "Website Redesign",
-      "description": "Redesign the company homepage",
-      "dueDate": "2024-03-01T00:00:00.000Z",
-      "status": "ACTIVE",
-      "createdBy": "uuid",
-      "createdAt": "2024-01-15T10:00:00.000Z",
-      "updatedAt": "2024-01-15T10:00:00.000Z"
-    }
-  }
-}
-```
+**Response `201`:** Returns the created project object.
+
+**Errors:**
+- `400` — name or dueDate missing
 
 **Side effects:**
-- Creates a `ProjectMember` entry for the creator with `role: LEAD`
-- Writes an `ActivityLog` entry with `action: PROJECT_CREATED`
+- Creates a `ProjectMember` for the creator: `role: LEAD`, `status: ACCEPTED`, `invitedBy: <self>`
+- Writes `ActivityLog` entry with `action: PROJECT_CREATED`
 
 ---
 
@@ -505,7 +468,7 @@ Create a new project. The creator is automatically added as a project member wit
 
 Get full project details including members.
 
-**Auth required:** [Auth] + must be a project member (or Admin)
+**Auth required:** [Member]
 
 **Response `200`:**
 ```json
@@ -527,14 +490,12 @@ Get full project details including members.
           "projectId": "uuid",
           "userId": "uuid",
           "role": "LEAD",
+          "status": "ACCEPTED",
+          "invitedBy": "uuid",
           "addedAt": "2024-01-15T10:00:00.000Z",
-          "user": {
-            "id": "uuid",
-            "name": "Alice Johnson",
-            "email": "alice@example.com",
-            "avatarUrl": null,
-            "role": "TEAM_LEAD"
-          }
+          "respondedAt": "2024-01-15T10:00:00.000Z",
+          "user": { "id": "uuid", "name": "Alice Johnson", "email": "alice@example.com", "avatarUrl": null },
+          "inviter": { "id": "uuid", "name": "Alice Johnson" }
         }
       ],
       "_count": { "tasks": 12 }
@@ -543,8 +504,10 @@ Get full project details including members.
 }
 ```
 
+Note: `members` includes rows in every status (`PENDING`/`ACCEPTED`/`DECLINED`), not just accepted ones — the client is responsible for filtering if it only wants active members.
+
 **Errors:**
-- `403` — not a project member
+- `403` — not an accepted project member
 - `404` — project not found
 
 ---
@@ -553,7 +516,7 @@ Get full project details including members.
 
 Update project name, description, or due date.
 
-**Auth required:** Project owner or Admin
+**Auth required:** [Lead]
 
 **Request body:**
 ```json
@@ -574,22 +537,11 @@ All fields optional.
 
 #### `PATCH /projects/:id/archive`
 
-Archive a project. Archived projects remain readable but are excluded from active views.
+Archive a project. Archived projects remain readable but are excluded from active views by the frontend.
 
-**Auth required:** Project owner or Admin
+**Auth required:** [Lead]
 
-**Request body:** None
-
-**Response `200`:**
-```json
-{
-  "success": true,
-  "message": "Success",
-  "data": {
-    "project": { "id": "uuid", "status": "ARCHIVED", "..." : "..." }
-  }
-}
-```
+**Response `200`:** Returns the project with `status: "ARCHIVED"`.
 
 **Side effects:** Writes `ActivityLog` entry with `action: PROJECT_ARCHIVED`
 
@@ -597,133 +549,153 @@ Archive a project. Archived projects remain readable but are excluded from activ
 
 #### `DELETE /projects/:id`
 
-Permanently delete a project and all associated data (tasks, comments, attachments, members, activity logs — cascade).
+Permanently delete a project and all associated data (tasks, comments, attachments, labels, members, activity logs — cascade via FK).
 
-**Auth required:** Project owner or Admin
+**Auth required:** [Lead]
 
 **Response `200`:**
 ```json
-{
-  "success": true,
-  "message": "Project deleted",
-  "data": null
-}
+{ "success": true, "message": "Project deleted", "data": null }
 ```
+
+---
+
+#### `POST /projects/:id/leave`
+
+Leave a project voluntarily. **The sole remaining LEAD cannot leave** — must promote another member to LEAD first.
+
+**Auth required:** [Member]
+
+**Response `200`:**
+```json
+{ "success": true, "message": "You have left the project", "data": null }
+```
+
+**Errors:**
+- `400` — caller is the only `ACCEPTED` LEAD on the project
+
+**Side effects:**
+- Deletes the caller's `ProjectMember` row
+- Unassigns (`assignedTo: null`) any tasks in the project that were assigned to the caller
+- Writes `ActivityLog` entry with `action: MEMBER_LEFT`
 
 ---
 
 #### `GET /projects/:id/members`
 
-List all members of a project.
+List all members of a project, in every invite status.
 
-**Auth required:** [Auth] + must be a project member (or Admin)
+**Auth required:** [Member]
 
-**Response `200`:**
-```json
-{
-  "success": true,
-  "message": "Success",
-  "data": {
-    "members": [
-      {
-        "id": "uuid",
-        "projectId": "uuid",
-        "userId": "uuid",
-        "role": "LEAD",
-        "addedAt": "2024-01-15T10:00:00.000Z",
-        "user": {
-          "id": "uuid",
-          "name": "Alice Johnson",
-          "email": "alice@example.com",
-          "avatarUrl": null,
-          "role": "TEAM_LEAD"
-        }
-      }
-    ]
-  }
-}
-```
+**Response `200`:** Array of `ProjectMember` rows as shown in `GET /projects/:id`, each with `user` and `inviter`.
 
 ---
 
 #### `POST /projects/:id/members`
 
-Add an existing user to a project.
+Invite a user to the project. This creates (or resets) a `PENDING` membership — it does **not** grant access immediately. The invited user must accept via `PATCH /invites/:membershipId/respond`.
 
-**Auth required:** Project owner or Admin
+**Auth required:** [Lead]
 
 **Request body:**
 ```json
 {
-  "userId": "uuid-of-user-to-add",
+  "userId": "uuid-of-user-to-invite",
   "role": "MEMBER"
 }
 ```
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `userId` | string | Yes | Must be an existing active user |
+| `userId` | string | Yes | Must be an existing user |
 | `role` | enum | No | `LEAD` or `MEMBER` — defaults to `MEMBER` |
+
+**Behavior on repeat invites:**
+- Existing `ACCEPTED` membership → `409 "User is already a member"`
+- Existing `PENDING` membership → `409 "An invite is already pending for this user"`
+- Existing `DECLINED` membership → the same row is reset to `PENDING` with a fresh `invitedBy`/`addedAt`
 
 **Response `201`:**
 ```json
 {
   "success": true,
-  "message": "Member added",
+  "message": "Invite sent",
   "data": {
     "member": {
       "id": "uuid",
       "projectId": "uuid",
       "userId": "uuid",
       "role": "MEMBER",
-      "addedAt": "2024-01-15T10:00:00.000Z"
+      "status": "PENDING",
+      "addedAt": "2024-01-15T10:00:00.000Z",
+      "user": { "id": "uuid", "name": "Bob Smith", "email": "bob@example.com", "avatarUrl": null }
     }
   }
 }
 ```
 
 **Errors:**
-- `404` — project not found
-- `409` — user is already a member
+- `400` — `userId` missing, or `role` is not `LEAD`/`MEMBER`
+- `404` — target user not found
+- `409` — see above
 
-**Side effects:** Writes `ActivityLog` entry with `action: MEMBER_ADDED`
+**Side effects:** Writes `ActivityLog` entry with `action: MEMBER_INVITED`
+
+---
+
+#### `PATCH /projects/:id/members/:userId`
+
+Change an existing accepted member's project role between `LEAD` and `MEMBER`.
+
+**Auth required:** [Lead]
+
+**Request body:**
+```json
+{ "role": "LEAD" }
+```
+
+**Response `200`:** Returns the updated membership row.
+
+**Errors:**
+- `400` — `role` is not `LEAD`/`MEMBER`, or caller tries to change their own role
+- `404` — target user has no `ACCEPTED` membership on this project
 
 ---
 
 #### `DELETE /projects/:id/members/:userId`
 
-Remove a user from a project.
+Remove a user from a project (Lead-initiated — for removing yourself, use `POST /projects/:id/leave`).
 
-**Auth required:** Project owner or Admin
+**Auth required:** [Lead]
 
 **Notes:**
 - Cannot remove the project owner (`createdBy`)
+- Cannot use this to remove yourself — use "leave" instead
 
 **Response `200`:**
 ```json
-{
-  "success": true,
-  "message": "Member removed",
-  "data": null
-}
+{ "success": true, "message": "Member removed", "data": null }
 ```
 
 **Errors:**
-- `400` — attempting to remove the project owner
+- `400` — target is the project owner, or target is the caller
 
-**Side effects:** Writes `ActivityLog` entry with `action: MEMBER_REMOVED`
+**Side effects:**
+- Deletes the `ProjectMember` row
+- Unassigns (`assignedTo: null`) any tasks in the project assigned to the removed user
+- Writes `ActivityLog` entry with `action: MEMBER_REMOVED`
 
 ---
 
 ### Tasks
 
-All task endpoints are nested under `/projects/:projectId/tasks`. The `projectId` in the path enforces that requests are always scoped to a project.
+All task endpoints are nested under `/projects/:projectId/tasks`. Every route in this router requires `requireProjectMember` at minimum.
 
 #### `GET /projects/:projectId/tasks`
 
 List all tasks in a project with optional filtering.
 
-**Auth required:** [Auth] + must be a project member (or Admin)
+**Auth required:** [Member]
 
 **Query params:**
 
@@ -756,7 +728,7 @@ List all tasks in a project with optional filtering.
         "assignee": { "id": "uuid", "name": "Bob Smith", "avatarUrl": null },
         "creator": { "id": "uuid", "name": "Alice Johnson" },
         "labels": [
-          { "taskId": "uuid", "labelId": "uuid", "label": { "id": "uuid", "name": "Design", "color": "#8B5CF6" } }
+          { "taskId": "uuid", "labelId": "uuid", "label": { "id": "uuid", "projectId": "uuid", "name": "Design", "color": "#8B5CF6" } }
         ],
         "_count": { "comments": 3, "attachments": 1 }
       }
@@ -765,13 +737,15 @@ List all tasks in a project with optional filtering.
 }
 ```
 
+`dueDate` may be `null` — it's optional on `Task`, unlike on `Project`.
+
 ---
 
 #### `POST /projects/:projectId/tasks`
 
 Create a new task in the project.
 
-**Auth required:** [Lead+] + must be a project member (or Admin)
+**Auth required:** [Lead]
 
 **Request body:**
 ```json
@@ -789,32 +763,17 @@ Create a new task in the project.
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `title` | string | Yes | |
-| `description` | string | No | |
+| `description` | string | No | defaults to `""` |
 | `priority` | enum | No | `LOW`, `MEDIUM`, `HIGH`, `CRITICAL` — defaults to `MEDIUM` |
 | `status` | enum | No | `TODO`, `IN_PROGRESS`, `REVIEW`, `COMPLETED` — defaults to `TODO` |
-| `dueDate` | ISO date string | No | |
-| `assignedTo` | string (UUID) | No | Must be a project member |
-| `labelIds` | string[] | No | Array of existing Label UUIDs |
+| `dueDate` | ISO date string | No | omit/`null` for no due date |
+| `assignedTo` | string (UUID) | No | not validated as a project member server-side |
+| `labelIds` | string[] | No | must be existing `Label` UUIDs scoped to this project |
 
-**Response `201`:**
-```json
-{
-  "success": true,
-  "message": "Task created",
-  "data": {
-    "task": {
-      "id": "uuid",
-      "projectId": "uuid",
-      "title": "Design homepage mockup",
-      "priority": "HIGH",
-      "status": "TODO",
-      "assignee": { "id": "uuid", "name": "Bob Smith", "avatarUrl": null },
-      "labels": [ ... ],
-      "..."
-    }
-  }
-}
-```
+**Response `201`:** Returns the created task with `assignee` and `labels` populated.
+
+**Errors:**
+- `400` — title missing
 
 **Side effects:**
 - Writes `ActivityLog` entry with `action: TASK_CREATED`
@@ -825,51 +784,14 @@ Create a new task in the project.
 
 #### `GET /projects/:projectId/tasks/:id`
 
-Get full task details including comments, attachments, and labels.
+Get full task details including comments and attachments.
 
-**Auth required:** [Auth] + must be a project member (or Admin)
+**Auth required:** [Member]
 
-**Response `200`:**
-```json
-{
-  "success": true,
-  "message": "Success",
-  "data": {
-    "task": {
-      "id": "uuid",
-      "title": "Design homepage mockup",
-      "description": "...",
-      "priority": "HIGH",
-      "status": "IN_PROGRESS",
-      "dueDate": "2024-02-01T00:00:00.000Z",
-      "assignee": { "id": "uuid", "name": "Bob Smith", "avatarUrl": null },
-      "creator": { "id": "uuid", "name": "Alice Johnson" },
-      "labels": [ { "label": { "id": "uuid", "name": "Design", "color": "#8B5CF6" } } ],
-      "comments": [
-        {
-          "id": "uuid",
-          "content": "Mockup looks good! @BobSmith can you review?",
-          "createdAt": "2024-01-16T09:00:00.000Z",
-          "updatedAt": "2024-01-16T09:00:00.000Z",
-          "author": { "id": "uuid", "name": "Alice Johnson", "avatarUrl": null },
-          "mentions": [
-            { "id": "uuid", "mentionedUser": { "id": "uuid", "name": "Bob Smith" } }
-          ]
-        }
-      ],
-      "attachments": [
-        {
-          "id": "uuid",
-          "fileName": "mockup-v1.pdf",
-          "fileType": "PDF",
-          "createdAt": "2024-01-16T10:00:00.000Z",
-          "uploader": { "id": "uuid", "name": "Alice Johnson" }
-        }
-      ]
-    }
-  }
-}
-```
+**Response `200`:** Task object with `assignee`, `creator`, `labels`, `comments` (with `author` + `mentions`, oldest-first), and `attachments` (with `uploader`, newest-first).
+
+**Errors:**
+- `404` — task not found in this project
 
 ---
 
@@ -877,7 +799,7 @@ Get full task details including comments, attachments, and labels.
 
 Update task metadata (title, description, priority, due date, assignee, labels).
 
-**Auth required:** [Lead+] + must be a project member (or Admin)
+**Auth required:** [Lead]
 
 **Request body:**
 ```json
@@ -891,7 +813,7 @@ Update task metadata (title, description, priority, due date, assignee, labels).
 }
 ```
 
-All fields optional. If `labelIds` is provided, the existing labels are **replaced** (not merged).
+All fields optional. If `labelIds` is provided (even `[]`), the existing `TaskLabel` rows are **replaced**, not merged. `status` is **not** updatable via this endpoint — use `PATCH .../status`.
 
 **Side effects:**
 - Writes `ActivityLog` entry with `action: TASK_UPDATED`
@@ -901,74 +823,57 @@ All fields optional. If `labelIds` is provided, the existing labels are **replac
 
 #### `PATCH /projects/:projectId/tasks/:id/status`
 
-Update task status only. This is the Kanban drag-and-drop endpoint.
+Update task status only. This is the board-column-move endpoint.
 
-**Auth required:** [Auth] + must be a project member (or Admin)
+**Auth required:** [Member]
 
 **Access rules:**
-- `TEAM_MEMBER` — can only update tasks where `assignedTo === currentUser.id`
-- `TEAM_LEAD` / `ADMIN` — can update any task in the project
+- `MEMBER` (project role) — can only update tasks where `assignedTo === currentUser.id`
+- `LEAD` (project role) — can update any task in the project
 
 **Request body:**
 ```json
-{
-  "status": "IN_PROGRESS"
-}
+{ "status": "IN_PROGRESS" }
 ```
 
 `status` must be one of: `TODO`, `IN_PROGRESS`, `REVIEW`, `COMPLETED`
 
-**Response `200`:**
-```json
-{
-  "success": true,
-  "message": "Success",
-  "data": {
-    "task": {
-      "id": "uuid",
-      "status": "IN_PROGRESS",
-      "..."
-    }
-  }
-}
-```
+**Response `200`:** Returns the updated task.
 
 **Errors:**
 - `400` — status missing
-- `403` — TEAM_MEMBER trying to update a task not assigned to them
+- `403` — MEMBER trying to update a task not assigned to them
 
 **Side effects:**
-- Writes `ActivityLog` entry with `action: TASK_STATUS_CHANGED`, metadata includes `{ from: "TODO", to: "IN_PROGRESS" }`
+- Writes `ActivityLog` entry with `action: TASK_STATUS_CHANGED`, metadata `{ from, to }`
 - Emits Socket.io `task:status_changed` to `project:{projectId}` room
 
 ---
 
 #### `DELETE /projects/:projectId/tasks/:id`
 
-Delete a task and all its comments, attachments, labels.
+Delete a task and all its comments, attachments, labels (cascade).
 
-**Auth required:** [Lead+] + must be a project member (or Admin)
+**Auth required:** [Lead]
 
 **Response `200`:**
 ```json
-{
-  "success": true,
-  "message": "Task deleted",
-  "data": null
-}
+{ "success": true, "message": "Task deleted", "data": null }
 ```
 
 **Side effects:** Writes `ActivityLog` entry with `action: TASK_DELETED`
 
 ---
 
-### Comments
+### Labels
 
-#### `GET /tasks/:taskId/comments`
+**Labels are project-scoped**, not global — each `Label` row belongs to exactly one `Project`. Routes are nested under `/projects/:projectId/labels`.
 
-List all comments on a task ordered oldest-first.
+#### `GET /projects/:projectId/labels`
 
-**Auth required:** [Auth] + must be a project member (or Admin)
+List all labels for a project.
+
+**Auth required:** [Member]
 
 **Response `200`:**
 ```json
@@ -976,18 +881,8 @@ List all comments on a task ordered oldest-first.
   "success": true,
   "message": "Success",
   "data": {
-    "comments": [
-      {
-        "id": "uuid",
-        "taskId": "uuid",
-        "content": "Looks good! @BobSmith please review the assets.",
-        "createdAt": "2024-01-16T09:00:00.000Z",
-        "updatedAt": "2024-01-16T09:00:00.000Z",
-        "author": { "id": "uuid", "name": "Alice Johnson", "avatarUrl": null },
-        "mentions": [
-          { "id": "uuid", "mentionedUser": { "id": "uuid", "name": "Bob Smith" } }
-        ]
-      }
+    "labels": [
+      { "id": "uuid", "projectId": "uuid", "name": "Design", "color": "#8B5CF6" }
     ]
   }
 }
@@ -995,47 +890,89 @@ List all comments on a task ordered oldest-first.
 
 ---
 
-#### `POST /tasks/:taskId/comments`
+#### `POST /projects/:projectId/labels`
 
-Add a comment to a task. @mentions are parsed server-side and stored as `CommentMention` rows.
+Create a label on this project. **Any accepted member can manage labels** — this is not Lead-gated.
 
-**Auth required:** [Auth] + must be a project member (or Admin)
+**Auth required:** [Member]
 
 **Request body:**
 ```json
-{
-  "content": "Looks good! @BobSmith please review the assets."
-}
+{ "name": "Design", "color": "#8B5CF6" }
 ```
 
-**@mention parsing:**
-- Tokens starting with `@` are matched against the project's member list by display name
-- `@BobSmith` matches a user with name `"Bob Smith"` (case-insensitive, spaces ignored)
-- Unmatched @tokens are stored as plain text — no error is thrown
+Both fields required.
 
-**Response `201`:**
+**Response `201`:** Returns the created label.
+
+**Errors:**
+- `400` — name or color missing
+
+---
+
+#### `PATCH /projects/:projectId/labels/:id`
+
+Update a label's name or color.
+
+**Auth required:** [Member]
+
+**Response `200`:** Returns updated label.
+
+**Errors:**
+- `404` — label not found on this project
+
+---
+
+#### `DELETE /projects/:projectId/labels/:id`
+
+Delete a label. Removes all `TaskLabel` associations via cascade.
+
+**Auth required:** [Member]
+
+**Response `200`:**
 ```json
-{
-  "success": true,
-  "message": "Comment added",
-  "data": {
-    "comment": {
-      "id": "uuid",
-      "taskId": "uuid",
-      "content": "Looks good! @BobSmith please review the assets.",
-      "createdAt": "2024-01-16T09:00:00.000Z",
-      "updatedAt": "2024-01-16T09:00:00.000Z",
-      "author": { "id": "uuid", "name": "Alice Johnson", "avatarUrl": null },
-      "mentions": [
-        { "id": "uuid", "mentionedUser": { "id": "uuid", "name": "Bob Smith" } }
-      ]
-    }
-  }
-}
+{ "success": true, "message": "Label deleted", "data": null }
 ```
 
 **Errors:**
-- `400` — content is empty
+- `404` — label not found on this project
+
+---
+
+### Comments
+
+Comment routes are nested under `/tasks/:taskId/comments` (not under `/projects`). They only require [Auth] at the router level — authorization for edit/delete is enforced inside the controller, and read/create do **not** verify project membership server-side.
+
+#### `GET /tasks/:taskId/comments`
+
+List all comments on a task, oldest-first.
+
+**Auth required:** [Auth]
+
+**Response `200`:** Array of comments with `author` and `mentions` (each `{ id, mentionedUser: { id, name } }`).
+
+---
+
+#### `POST /tasks/:taskId/comments`
+
+Add a comment to a task. `@mentions` are parsed server-side and stored as `CommentMention` rows.
+
+**Auth required:** [Auth]
+
+**Request body:**
+```json
+{ "content": "Looks good! @BobSmith please review the assets." }
+```
+
+**@mention parsing:**
+- Tokens starting with `@` are matched against the task's project member list by display name (case-insensitive, spaces ignored)
+- `@BobSmith` matches a user with name `"Bob Smith"`
+- Unmatched `@tokens` are stored as plain text — no error
+
+**Response `201`:** Returns the created comment with `author` and `mentions`.
+
+**Errors:**
+- `400` — content is empty/whitespace
 - `404` — task not found
 
 **Side effects:**
@@ -1046,22 +983,21 @@ Add a comment to a task. @mentions are parsed server-side and stored as `Comment
 
 #### `PATCH /tasks/:taskId/comments/:id`
 
-Edit a comment. Re-parses @mentions and replaces all `CommentMention` rows.
+Edit a comment. Re-parses `@mentions` and replaces all `CommentMention` rows.
 
-**Auth required:** Comment author (any role) or Lead+ for moderation
-
-**Access rules:**
-- `TEAM_MEMBER` — can only edit their own comments
-- `TEAM_LEAD` / `ADMIN` — can edit any comment
+**Auth required:** **Comment author only** — there is no Lead/moderator override for editing.
 
 **Request body:**
 ```json
-{
-  "content": "Updated comment text with @AliceJohnson mention."
-}
+{ "content": "Updated comment text with @AliceJohnson mention." }
 ```
 
 **Response `200`:** Returns updated comment with re-parsed mentions.
+
+**Errors:**
+- `400` — content empty
+- `403` — caller is not the comment author
+- `404` — comment not found
 
 ---
 
@@ -1069,16 +1005,16 @@ Edit a comment. Re-parses @mentions and replaces all `CommentMention` rows.
 
 Delete a comment.
 
-**Auth required:** Comment author, `TEAM_LEAD`, or `ADMIN`
+**Auth required:** Comment author, **or** a `LEAD` on the comment's project
 
 **Response `200`:**
 ```json
-{
-  "success": true,
-  "message": "Comment deleted",
-  "data": null
-}
+{ "success": true, "message": "Comment deleted", "data": null }
 ```
+
+**Errors:**
+- `403` — caller is neither the author nor a project LEAD
+- `404` — comment not found
 
 ---
 
@@ -1086,7 +1022,7 @@ Delete a comment.
 
 #### `GET /mentions/me`
 
-Get all comments where the current user has been @mentioned. Acts as a notification substitute — sorted newest first, capped at 50.
+Get all comments where the current user has been `@mentioned`. Acts as a notification substitute — sorted newest first, capped at 50.
 
 **Auth required:** [Auth]
 
@@ -1106,11 +1042,7 @@ Get all comments where the current user has been @mentioned. Acts as a notificat
           "content": "Hey @BobSmith can you check this?",
           "createdAt": "2024-01-16T09:00:00.000Z",
           "author": { "id": "uuid", "name": "Alice Johnson", "avatarUrl": null },
-          "task": {
-            "id": "uuid",
-            "title": "Design homepage mockup",
-            "projectId": "uuid"
-          }
+          "task": { "id": "uuid", "title": "Design homepage mockup", "projectId": "uuid" }
         }
       }
     ]
@@ -1122,11 +1054,13 @@ Get all comments where the current user has been @mentioned. Acts as a notificat
 
 ### Attachments
 
+Attachment routes are nested under `/tasks/:taskId/attachments`.
+
 #### `POST /tasks/:taskId/attachments`
 
 Upload a file to a task. File is stored in Supabase Storage (private bucket). A storage path is saved — never a public URL.
 
-**Auth required:** [Auth] + must be a project member (or Admin)
+**Auth required:** [Auth] + must be an `ACCEPTED` member of the task's project (checked in the controller, not route middleware)
 
 **Content-Type:** `multipart/form-data`
 
@@ -1134,35 +1068,18 @@ Upload a file to a task. File is stored in Supabase Storage (private bucket). A 
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `file` | File | Yes | Max 10 MB. Allowed: JPEG, PNG, GIF, WEBP, PDF, DOCX |
+| `file` | File | Yes | Max 10 MB. Allowed MIME types: `image/jpeg`, `image/png`, `image/gif`, `image/webp`, `application/pdf`, `application/vnd.openxmlformats-officedocument.wordprocessingml.document` (`.docx`) |
 
 **Storage path format:**
 ```
 project-{projectId}/task-{taskId}/{uuid}.{ext}
 ```
 
-**Response `201`:**
-```json
-{
-  "success": true,
-  "message": "File uploaded",
-  "data": {
-    "attachment": {
-      "id": "uuid",
-      "taskId": "uuid",
-      "fileName": "mockup-v1.pdf",
-      "fileType": "PDF",
-      "filePath": "project-uuid/task-uuid/abc123.pdf",
-      "createdAt": "2024-01-16T10:00:00.000Z",
-      "uploader": { "id": "uuid", "name": "Alice Johnson" }
-    }
-  }
-}
-```
+**Response `201`:** Returns the attachment with `uploader`.
 
 **Errors:**
-- `400` — no file provided
-- `403` — not a project member
+- `400` — no file provided, or file rejected by `fileFilter` (unsupported MIME type)
+- `403` — not an accepted member of the project
 - `404` — task not found
 
 **Side effects:** Writes `ActivityLog` entry with `action: ATTACHMENT_UPLOADED`
@@ -1173,39 +1090,18 @@ project-{projectId}/task-{taskId}/{uuid}.{ext}
 
 List all attachments on a task (metadata only, no URLs).
 
-**Auth required:** [Auth] + must be a project member (or Admin)
-
-**Response `200`:**
-```json
-{
-  "success": true,
-  "message": "Success",
-  "data": {
-    "attachments": [
-      {
-        "id": "uuid",
-        "taskId": "uuid",
-        "fileName": "mockup-v1.pdf",
-        "fileType": "PDF",
-        "filePath": "project-uuid/task-uuid/abc123.pdf",
-        "createdAt": "2024-01-16T10:00:00.000Z",
-        "uploader": { "id": "uuid", "name": "Alice Johnson" }
-      }
-    ]
-  }
-}
-```
+**Auth required:** [Auth] + must be an accepted project member
 
 ---
 
 #### `GET /tasks/:taskId/attachments/:id/url`
 
-Generate a short-lived signed URL to access or download the file directly from Supabase Storage.
+Generate a short-lived signed URL to access/download the file directly from Supabase Storage.
 
-**Auth required:** [Auth] + must be a project member (or Admin)
+**Auth required:** [Auth] + must be an accepted project member
 
 **Notes:**
-- The permission check is performed by the backend — Supabase never issues the signed URL without Express authorizing the request first
+- The permission check happens on the Express backend — Supabase never issues the signed URL without Express authorizing the request first
 - Signed URL expires in **120 seconds**
 
 **Response `200`:**
@@ -1221,7 +1117,7 @@ Generate a short-lived signed URL to access or download the file directly from S
 ```
 
 **Errors:**
-- `403` — not a project member
+- `403` — not an accepted member of the project
 - `404` — attachment not found
 
 ---
@@ -1230,106 +1126,11 @@ Generate a short-lived signed URL to access or download the file directly from S
 
 Delete an attachment from both Supabase Storage and the database.
 
-**Auth required:** Uploader, `TEAM_LEAD`, or `ADMIN`
-
-**Access rules:**
-- `TEAM_MEMBER` — can only delete attachments they uploaded
-- `TEAM_LEAD` / `ADMIN` — can delete any attachment
+**Auth required:** Uploader, **or** a `LEAD` on the attachment's project
 
 **Response `200`:**
 ```json
-{
-  "success": true,
-  "message": "Attachment deleted",
-  "data": null
-}
-```
-
----
-
-### Labels
-
-#### `GET /labels`
-
-List all labels (global, not project-scoped).
-
-**Auth required:** [Auth]
-
-**Response `200`:**
-```json
-{
-  "success": true,
-  "message": "Success",
-  "data": {
-    "labels": [
-      { "id": "uuid", "name": "Design", "color": "#8B5CF6" },
-      { "id": "uuid", "name": "Bug", "color": "#EF4444" },
-      { "id": "uuid", "name": "Feature", "color": "#10B981" }
-    ]
-  }
-}
-```
-
----
-
-#### `POST /labels`
-
-Create a new label.
-
-**Auth required:** [Lead+]
-
-**Request body:**
-```json
-{
-  "name": "Design",
-  "color": "#8B5CF6"
-}
-```
-
-**Response `201`:**
-```json
-{
-  "success": true,
-  "message": "Label created",
-  "data": {
-    "label": { "id": "uuid", "name": "Design", "color": "#8B5CF6" }
-  }
-}
-```
-
----
-
-#### `PATCH /labels/:id`
-
-Update a label's name or color. Updates apply everywhere the label is used.
-
-**Auth required:** [Lead+]
-
-**Request body:**
-```json
-{
-  "name": "UI Design",
-  "color": "#7C3AED"
-}
-```
-
-**Response `200`:** Returns updated label.
-
----
-
-#### `DELETE /labels/:id`
-
-Delete a label. Removes all `TaskLabel` associations via cascade.
-
-**Auth required:** [Admin]
-
-**Response `200`:**
-```json
-{
-  "success": true,
-  "message": "Label deleted",
-  "data": null
-}
+{ "success": true, "message": "Attachment deleted", "data": null }
 ```
 
 ---
@@ -1338,14 +1139,9 @@ Delete a label. Removes all `TaskLabel` associations via cascade.
 
 #### `GET /dashboard`
 
-Returns role-scoped statistics for the current user.
+Returns statistics scoped to projects the current user is an `ACCEPTED` member of (any role), plus tasks assigned to them personally. `GET /dashboard/stats` is an alias for the same handler.
 
 **Auth required:** [Auth]
-
-**Scope behavior:**
-- `ADMIN` — org-wide data across all projects
-- `TEAM_LEAD` — data scoped to projects they lead
-- `TEAM_MEMBER` — data scoped to tasks assigned to them
 
 **Response `200`:**
 ```json
@@ -1353,20 +1149,22 @@ Returns role-scoped statistics for the current user.
   "success": true,
   "message": "Success",
   "data": {
-    "taskStats": {
-      "todo": 5,
-      "inProgress": 8,
-      "review": 3,
-      "completed": 24
-    },
-    "upcomingDeadlines": [
+    "totalProjects": 4,
+    "activeTasks": 8,
+    "completedTasks": 24,
+    "overdueTasksCount": 2,
+    "myTasks": [
       {
         "id": "uuid",
         "title": "Submit final report",
-        "dueDate": "2024-02-01T00:00:00.000Z",
+        "status": "IN_PROGRESS",
         "priority": "HIGH",
+        "dueDate": "2024-02-01T00:00:00.000Z",
         "projectId": "uuid",
-        "assignee": { "id": "uuid", "name": "Bob Smith" }
+        "assignedTo": "uuid",
+        "createdBy": "uuid",
+        "createdAt": "2024-01-10T00:00:00.000Z",
+        "assignee": { "id": "uuid", "name": "Bob Smith", "avatarUrl": null }
       }
     ],
     "recentActivity": [
@@ -1379,19 +1177,15 @@ Returns role-scoped statistics for the current user.
         "createdAt": "2024-01-16T09:00:00.000Z",
         "user": { "id": "uuid", "name": "Bob Smith", "avatarUrl": null }
       }
-    ],
-    "projectProgress": [
-      {
-        "id": "uuid",
-        "name": "Website Redesign",
-        "totalTasks": 12,
-        "completedTasks": 7,
-        "progress": 58
-      }
     ]
   }
 }
 ```
+
+Notes on scope:
+- `totalProjects` / `activeTasks` / `completedTasks` / `overdueTasksCount` / `recentActivity` are scoped to **all projects the user belongs to** (any role, accepted only)
+- `myTasks` is scoped to **tasks assigned to the user personally** (not filtered by project membership, but assignment already implies it), incomplete only, top 10 by soonest due date
+- There is no `taskStats` breakdown by status, no separate `upcomingDeadlines`/`projectProgress` blocks, and no per-role scope difference — this shape is the same for every user, since there's no account role to branch on
 
 ---
 
@@ -1399,16 +1193,11 @@ Returns role-scoped statistics for the current user.
 
 #### `GET /activity`
 
-Get activity feed scoped to the current user's role.
+Activity feed scoped to **projects the current user LEADs** (`ProjectMember.role === 'LEAD'`, `status === 'ACCEPTED'`) — not just projects they're a member of, and not just their own actions.
 
 **Auth required:** [Auth]
 
-**Scope behavior:**
-- `ADMIN` — all activity
-- `TEAM_LEAD` — activity in their projects
-- `TEAM_MEMBER` — only their own actions
-
-**Query params:** `page`, `limit` (default `30`)
+**Query params:** `page` (default `1`), `limit` (default `30`)
 
 **Response `200`:**
 ```json
@@ -1442,11 +1231,14 @@ Get activity feed scoped to the current user's role.
 | `PROJECT_CREATED` | Project created |
 | `PROJECT_UPDATED` | Project name/description/date changed |
 | `PROJECT_ARCHIVED` | Project archived |
-| `MEMBER_ADDED` | User added to project |
-| `MEMBER_REMOVED` | User removed from project |
+| `MEMBER_INVITED` | User invited to project |
+| `INVITE_ACCEPTED` | Invited user accepted |
+| `INVITE_DECLINED` | Invited user declined |
+| `MEMBER_REMOVED` | User removed from project by a Lead |
+| `MEMBER_LEFT` | User left a project voluntarily |
 | `TASK_CREATED` | Task created |
 | `TASK_UPDATED` | Task metadata changed |
-| `TASK_STATUS_CHANGED` | Task moved on Kanban |
+| `TASK_STATUS_CHANGED` | Task moved to a new status |
 | `TASK_DELETED` | Task deleted |
 | `COMMENT_ADDED` | Comment posted on task |
 | `ATTACHMENT_UPLOADED` | File attached to task |
@@ -1455,21 +1247,17 @@ Get activity feed scoped to the current user's role.
 
 #### `GET /activity/audit`
 
-Full unfiltered `ActivityLog` — all events across the entire org.
+**Currently scoped identically to `GET /activity`** (projects the user leads) — it is not an unfiltered, org-wide audit log, since there is no admin/global scope in this system. Kept as a separate endpoint for a future distinction; today it returns the same data shape and same query params (`page`, default `limit` `50`).
 
-**Auth required:** [Admin]
-
-**Query params:** `page`, `limit` (default `50`)
-
-**Response `200`:** Same shape as `GET /activity`.
+**Auth required:** [Auth]
 
 ---
 
 #### `GET /activity/project/:projectId`
 
-Activity feed scoped to one project.
+Activity feed scoped to one project, unfiltered by action or user.
 
-**Auth required:** [Auth] + must be a project member (or Admin)
+**Auth required:** [Member]
 
 **Query params:** `page`, `limit`
 
@@ -1479,19 +1267,15 @@ Activity feed scoped to one project.
 
 ### Reports
 
-All report endpoints are restricted to `TEAM_LEAD` and `ADMIN`. Team Leads see data scoped to their own projects; Admins see org-wide data. Pass `?projectId=` to further narrow scope.
+All report endpoints require only [Auth] at the route level — there is no role gate at the router. Scope is computed inside each controller as **"projects the current user LEADs"** (same `getScopedProjectIds` helper). Passing `?projectId=` narrows to that project, but the controller **does validate** it's in the caller's led-project list first — `403 "You do not have report access to this project"` otherwise. (This check was added after an initial version trusted `projectId` blindly, which let any authenticated user pull report data for a project they weren't even a member of — an IDOR. If you're auditing this code, confirm all three endpoints below still have the check; it's easy to lose on a future edit since it's not enforced by middleware.)
 
 #### `GET /reports/overview`
 
 Task completion summary, delayed tasks, daily completion trend over the last 7 days.
 
-**Auth required:** [Lead+]
+**Auth required:** [Auth]
 
-**Query params:**
-
-| Param | Type | Description |
-|---|---|---|
-| `projectId` | string | Narrow to a single project |
+**Query params:** `projectId` (optional — narrows scope)
 
 **Response `200`:**
 ```json
@@ -1503,12 +1287,7 @@ Task completion summary, delayed tasks, daily completion trend over the last 7 d
     "completed": 24,
     "delayed": 3,
     "completionRate": 60,
-    "byPriority": {
-      "LOW": 5,
-      "MEDIUM": 18,
-      "HIGH": 12,
-      "CRITICAL": 5
-    },
+    "byPriority": { "LOW": 5, "MEDIUM": 18, "HIGH": 12, "CRITICAL": 5 },
     "dailyCompleted": {
       "2024-01-10": 2,
       "2024-01-11": 4,
@@ -1522,19 +1301,17 @@ Task completion summary, delayed tasks, daily completion trend over the last 7 d
 }
 ```
 
+`dailyCompleted` is keyed by `updatedAt` date of tasks completed in the last 7 days (not a true "completed on this day" audit trail — a task re-marked `COMPLETED` bumps `updatedAt`).
+
 ---
 
 #### `GET /reports/team-performance`
 
-Per-member task statistics for chart rendering.
+Per-assignee task statistics for chart rendering.
 
-**Auth required:** [Lead+]
+**Auth required:** [Auth]
 
-**Query params:**
-
-| Param | Type | Description |
-|---|---|---|
-| `projectId` | string | Narrow to a single project |
+**Query params:** `projectId` (optional)
 
 **Response `200`:**
 ```json
@@ -1543,15 +1320,7 @@ Per-member task statistics for chart rendering.
   "message": "Success",
   "data": {
     "performance": [
-      {
-        "id": "uuid",
-        "name": "Bob Smith",
-        "avatarUrl": null,
-        "total": 10,
-        "completed": 7,
-        "inProgress": 2,
-        "completionRate": 70
-      }
+      { "id": "uuid", "name": "Bob Smith", "avatarUrl": null, "total": 10, "completed": 7, "inProgress": 2, "completionRate": 70 }
     ]
   }
 }
@@ -1561,15 +1330,11 @@ Per-member task statistics for chart rendering.
 
 #### `GET /reports/export`
 
-Returns full report data as JSON. The frontend uses this payload to generate a PDF via a client-side library (e.g. jsPDF).
+Returns full report data as JSON for client-side PDF generation.
 
-**Auth required:** [Lead+]
+**Auth required:** [Auth]
 
-**Query params:**
-
-| Param | Type | Description |
-|---|---|---|
-| `projectId` | string | Narrow to a single project |
+**Query params:** `projectId` (optional)
 
 **Response `200`:**
 ```json
@@ -1577,12 +1342,14 @@ Returns full report data as JSON. The frontend uses this payload to generate a P
   "success": true,
   "message": "Success",
   "data": {
-    "tasks": [ { "...full task objects with assignee and project..." } ],
-    "projects": [ { "...project objects with task/member counts..." } ],
+    "tasks": [ "...full task objects with assignee and project..." ],
+    "projects": [ "...project objects with task/member counts..." ],
     "generatedAt": "2024-01-16T10:00:00.000Z"
   }
 }
 ```
+
+**Frontend status:** `client/src/pages/ReportsPage.tsx` (route `/reports`) consumes all three report endpoints — stat cards + priority breakdown from `overview`, a table from `team-performance`, and a "Export JSON" button that downloads the `export` payload as a file. There's still no PDF generation (`client/package.json` has no PDF/chart library) — export is raw JSON, not a formatted PDF. The page's project picker only lists projects where `myRole === 'LEAD'` (see `GET /projects`), matching the endpoints' actual authorization.
 
 ---
 
@@ -1598,11 +1365,11 @@ const socket = io('http://localhost:5000', {
 });
 ```
 
-If the token is missing or invalid, the connection is rejected with an `Unauthorized` error.
+If the token is missing or invalid, the connection is rejected with an `Unauthorized`/`Invalid or expired token` error — same JWT used for REST, verified the same way (`verifyToken`), but **not** re-checked against project membership at the socket layer.
 
 ### Rooms
 
-Clients join project rooms to receive project-scoped events:
+Clients join project rooms to receive project-scoped events. Membership is **not verified server-side** on join — any authenticated socket can join any `project:{id}` room by guessing/knowing the id.
 
 ```js
 // Join — call when user opens a project
@@ -1614,7 +1381,7 @@ socket.emit('leave:project', projectId);
 
 ### Server → Client Events
 
-All events are emitted to `project:{projectId}` rooms only — users not in the room never receive the event.
+All events are emitted to `project:{projectId}` rooms only — sockets not in the room never receive the event.
 
 ---
 
@@ -1628,13 +1395,11 @@ socket.on('task:created', ({ task }) => {
 });
 ```
 
-**When to use:** Add the new task card to the Kanban board in real time.
-
 ---
 
 #### `task:assigned`
 
-Fired when a task is assigned or reassigned to a user.
+Fired when a task is assigned or reassigned to a user (on create with `assignedTo` set, or on update when `assignedTo` changes).
 
 ```js
 socket.on('task:assigned', ({ taskId, assignedTo }) => {
@@ -1643,23 +1408,17 @@ socket.on('task:assigned', ({ taskId, assignedTo }) => {
 });
 ```
 
-**When to use:** Update the assignee chip on the task card; highlight in the assignee's dashboard.
-
 ---
 
 #### `task:status_changed`
 
-Fired when a task's status changes (Kanban drag-and-drop).
+Fired when a task's status changes.
 
 ```js
 socket.on('task:status_changed', ({ taskId, status, projectId }) => {
-  // taskId: string
   // status: 'TODO' | 'IN_PROGRESS' | 'REVIEW' | 'COMPLETED'
-  // projectId: string
 });
 ```
-
-**When to use:** Move the task card to the new column on all connected clients' Kanban boards.
 
 ---
 
@@ -1670,12 +1429,13 @@ Fired when a comment is posted on any task in the project.
 ```js
 socket.on('comment:new', ({ comment, taskId }) => {
   // comment: full comment object with author and mentions
-  // taskId: string
 });
 ```
 
-**When to use:** Append the new comment to the comment thread if the user has that task open.
+---
+
+**Not implemented:** there is no socket event for invites (`MEMBER_INVITED`/`INVITE_ACCEPTED`) — those are activity-log-only, no real-time push.
 
 ---
 
-*Last updated: based on v1 implementation. Append new decisions below this line.*
+*Last verified against the server implementation (post `architectural-change` merge) — schema has no `User.role`; access control is entirely project-scoped via `ProjectMember.role`/`status`. Append new decisions below this line.*

@@ -386,7 +386,7 @@ function TaskDetailModal({
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 export function ProjectDetailPage() {
-  const { projectId } = useParams<{ projectId: string }>();
+  const { projectId, taskId } = useParams<{ projectId: string; taskId?: string }>();
   const navigate = useNavigate();
   const qc = useQueryClient();
   const { user } = useAuth();
@@ -416,6 +416,15 @@ export function ProjectDetailPage() {
     queryKey: ['tasks', pid],
     queryFn: () => taskService.list(pid, { limit: 100 }),
   });
+
+  // Keep the open task modal in sync with the URL, so a task has a shareable/deep-linkable address
+  // (/projects/:id/tasks/:taskId) instead of only existing as ephemeral modal state.
+  useEffect(() => {
+    if (tasksLoading) return;
+    if (!taskId) { setSelectedTask(null); return; }
+    const found = (taskData?.tasks ?? []).find((t) => t.id === taskId);
+    setSelectedTask(found ?? null);
+  }, [taskId, taskData, tasksLoading]);
 
   const { data: members = [] } = useQuery({
     queryKey: ['members', pid],
@@ -636,7 +645,7 @@ export function ProjectDetailPage() {
                       </div>
                       <div className="p-3 space-y-2.5">
                         {col.map((t) => (
-                          <TaskCard key={t.id} task={t} onClick={() => setSelectedTask(t)} />
+                          <TaskCard key={t.id} task={t} onClick={() => navigate(`/projects/${pid}/tasks/${t.id}`)} />
                         ))}
                         {canManage && (
                           <button
@@ -921,7 +930,7 @@ export function ProjectDetailPage() {
       {selectedTask && (
         <Modal
           isOpen
-          onClose={() => setSelectedTask(null)}
+          onClose={() => navigate(`/projects/${pid}`)}
           title={selectedTask.title}
           size="lg"
         >
@@ -930,7 +939,7 @@ export function ProjectDetailPage() {
             projectId={pid}
             members={members}
             isLead={!!canManage}
-            onClose={() => setSelectedTask(null)}
+            onClose={() => navigate(`/projects/${pid}`)}
           />
         </Modal>
       )}

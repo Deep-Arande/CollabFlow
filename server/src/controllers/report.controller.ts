@@ -17,6 +17,9 @@ export const getOverview = asyncHandler(async (req: Request, res: Response) => {
   const { projectId } = req.query as { projectId?: string };
 
   const projectIds = await getScopedProjectIds(userId);
+  if (projectId && !projectIds.includes(projectId)) {
+    return api.error(res, 'You do not have report access to this project', 403);
+  }
   const taskWhere = {
     ...(projectId ? { projectId } : { projectId: { in: projectIds } }),
   };
@@ -66,6 +69,9 @@ export const getTeamPerformance = asyncHandler(async (req: Request, res: Respons
   const { projectId } = req.query as { projectId?: string };
 
   const projectIds = await getScopedProjectIds(userId);
+  if (projectId && !projectIds.includes(projectId)) {
+    return api.error(res, 'You do not have report access to this project', 403);
+  }
   const taskWhere = {
     ...(projectId ? { projectId } : { projectId: { in: projectIds } }),
     assignedTo: { not: null },
@@ -97,14 +103,16 @@ export const getTeamPerformance = asyncHandler(async (req: Request, res: Respons
 });
 
 export const exportReport = asyncHandler(async (req: Request, res: Response) => {
-  // Returns full report data as JSON. Frontend uses this to generate PDF via jsPDF or similar.
+  // Returns full report data as JSON. Frontend uses this to generate PDF or similar.
   const { userId } = req.user!;
   const { projectId } = req.query as { projectId?: string };
 
   const projectIds = await getScopedProjectIds(userId);
-  const taskWhere = {
-    ...(projectId ? { projectId } : { projectId: { in: projectIds } }),
-  };
+  if (projectId && !projectIds.includes(projectId)) {
+    return api.error(res, 'You do not have report access to this project', 403);
+  }
+  const scopedProjectIds = projectId ? [projectId] : projectIds;
+  const taskWhere = { projectId: { in: scopedProjectIds } };
 
   const [tasks, projects] = await Promise.all([
     prisma.task.findMany({
@@ -116,7 +124,7 @@ export const exportReport = asyncHandler(async (req: Request, res: Response) => 
       orderBy: { createdAt: 'desc' },
     }),
     prisma.project.findMany({
-      where: { id: { in: projectIds } },
+      where: { id: { in: scopedProjectIds } },
       include: { _count: { select: { tasks: true, members: true } } },
     }),
   ]);

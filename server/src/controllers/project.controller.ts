@@ -13,12 +13,17 @@ export const listProjects = asyncHandler(async (req: Request, res: Response) => 
     where: { members: { some: { userId, status: 'ACCEPTED' } } },
     include: {
       creator: { select: { id: true, name: true } },
+      members: { where: { userId }, select: { role: true } },
       _count: { select: { tasks: true, members: true } },
     },
     orderBy: { createdAt: 'desc' },
   });
 
-  return api.success(res, { projects });
+  // Surface the caller's own project-scoped role so the client can tell LEAD from MEMBER
+  // without fetching the full member list per project.
+  const withRole = projects.map(({ members, ...p }) => ({ ...p, myRole: members[0]?.role ?? null }));
+
+  return api.success(res, { projects: withRole });
 });
 
 export const createProject = asyncHandler(async (req: Request, res: Response) => {
