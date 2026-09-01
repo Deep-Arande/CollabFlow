@@ -91,7 +91,8 @@ Dashboard is the exception — it's scoped to **all projects the user belongs to
    - Email verification & forgot/reset password: still deferred
 
 2. **Dashboard**
-   - `totalProjects`, `activeTasks`, `completedTasks`, `overdueTasksCount`, `myTasks`, `recentActivity` — one flat shape for every user
+   - `totalProjects`, `activeTasks`, `completedTasks`, `overdueTasksCount`, `myTasks`, `overdueTasks`, `recentActivity` — one flat shape for every user
+   - Interactive, not just read-only: "My Tasks" rows and "Recent Activity" entries deep-link to the exact task (via `/projects/:id/tasks/:taskId`) where the underlying `targetType` is `Task`; "Total Projects" links to `/projects`; the "Overdue" stat card expands an inline list (`overdueTasks`, capped at 10, spans every project the user belongs to — not just tasks assigned to them, unlike `myTasks`) instead of just showing a number
    - No charts implemented yet (see Section 10)
 
 3. **Projects**
@@ -121,6 +122,9 @@ Dashboard is the exception — it's scoped to **all projects the user belongs to
    - Backend endpoints exist (`/reports/overview`, `/reports/team-performance`, `/reports/export`) and are scoped to projects the user leads
    - `client/src/pages/ReportsPage.tsx` (route `/reports`) consumes all three: stat cards + priority bars, a team performance table, and a JSON export download. No chart or PDF library is installed (`recharts`, `chart.js`, `jspdf`, etc.) — priority breakdown is plain CSS bars, export is raw JSON rather than a formatted PDF.
    - The project picker on this page only lists projects where the caller's `myRole === 'LEAD'` (see `GET /projects`'s `myRole` field). This matters because the backend endpoints themselves validate `?projectId=` against the caller's led-project list and `403` otherwise — **this validation was missing in an earlier version** and let any authenticated user pull report data for a project they weren't even a member of by passing its id directly (an IDOR). Fixed in `report.controller.ts`'s three handlers; if you're touching that file again, keep the `projectIds.includes(projectId)` check intact.
+   - Five stat cards now: Total, Completed, In Progress, Delayed, Completion Rate. `getOverview` gained an `inProgress` count (added alongside the existing `total`/`completed`/`delayed` counts in the same `Promise.all`, for consistency with those — deliberately not derived client-side from `export`, which loads via a separate query and would otherwise flash `0`). The first four cards are each clickable and toggle one shared drill-down panel (`statFilter` state) instead of four separate blocks; the list itself is still derived client-side from the already-fetched `export` payload's tasks (filtered by status), same pattern as the original Delayed-only list.
+   - That drill-down panel also has a member filter `<select>`. It's populated from `GET /projects/:id/members` (one call per project in scope via `useQueries`, merged/deduped) rather than from `team-performance`'s per-assignee list, specifically so a member with **zero** matching tasks — most commonly the project's own Lead — still shows up as a filter option instead of only members who already have an assigned task.
+   - Beyond the stat cards, the page also renders: a 7-day completion trend bar chart (from `overview.dailyCompleted`, previously fetched but unused), and — only when viewing "All projects I lead" with more than one led project — a per-project comparison table (one `overview` call per led project via `useQueries`) so a multi-project Lead can see which specific project is behind instead of one blended number.
 
 8. **Real-Time (Socket.io)**
    - `task:created`, `task:assigned`, `task:status_changed`, `comment:new` — all implemented, room-scoped to `project:{projectId}`

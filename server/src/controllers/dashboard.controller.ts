@@ -18,7 +18,7 @@ export const getDashboard = asyncHandler(async (req: Request, res: Response) => 
 
   const now = new Date();
 
-  const [totalProjects, activeTasksCount, completedTasksCount, overdueTasksCount, myTasks, recentActivity] =
+  const [totalProjects, activeTasksCount, completedTasksCount, overdueTasksCount, myTasks, overdueTasks, recentActivity] =
     await Promise.all([
       prisma.project.count({
         where: { members: { some: { userId, status: 'ACCEPTED' } } },
@@ -54,6 +54,28 @@ export const getDashboard = asyncHandler(async (req: Request, res: Response) => 
         take: 10,
       }),
 
+      // Backs the "Overdue" stat card's expanded list — same shape as myTasks plus
+      // the project name, since these span every project the user belongs to, not just
+      // tasks assigned to them.
+      prisma.task.findMany({
+        where: { ...taskScopeWhere, status: { not: 'COMPLETED' }, dueDate: { lt: now } },
+        select: {
+          id: true,
+          title: true,
+          status: true,
+          priority: true,
+          dueDate: true,
+          projectId: true,
+          assignedTo: true,
+          createdBy: true,
+          createdAt: true,
+          assignee: { select: { id: true, name: true, avatarUrl: true } },
+          project: { select: { id: true, name: true } },
+        },
+        orderBy: { dueDate: 'asc' },
+        take: 10,
+      }),
+
       prisma.activityLog.findMany({
         where: activityWhere,
         include: { user: { select: { id: true, name: true, avatarUrl: true } } },
@@ -68,6 +90,7 @@ export const getDashboard = asyncHandler(async (req: Request, res: Response) => 
     completedTasks: completedTasksCount,
     overdueTasksCount,
     myTasks,
+    overdueTasks,
     recentActivity,
   });
 });

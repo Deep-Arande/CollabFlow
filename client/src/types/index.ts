@@ -74,6 +74,7 @@ export interface Task {
   comments?: Comment[];
   attachments?: Attachment[];
   labels?: { label: Label }[];
+  project?: { id: string; name: string };
 }
 
 export interface Comment {
@@ -130,6 +131,7 @@ export interface DashboardStats {
   completedTasks: number;
   overdueTasksCount: number;
   myTasks: Task[];
+  overdueTasks: Task[];
   recentActivity: ActivityLog[];
 }
 
