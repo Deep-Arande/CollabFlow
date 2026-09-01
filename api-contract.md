@@ -1167,6 +1167,21 @@ Returns statistics scoped to projects the current user is an `ACCEPTED` member o
         "assignee": { "id": "uuid", "name": "Bob Smith", "avatarUrl": null }
       }
     ],
+    "overdueTasks": [
+      {
+        "id": "uuid",
+        "title": "Ship landing page copy",
+        "status": "IN_PROGRESS",
+        "priority": "CRITICAL",
+        "dueDate": "2024-01-20T00:00:00.000Z",
+        "projectId": "uuid",
+        "assignedTo": "uuid",
+        "createdBy": "uuid",
+        "createdAt": "2024-01-10T00:00:00.000Z",
+        "assignee": { "id": "uuid", "name": "Bob Smith", "avatarUrl": null },
+        "project": { "id": "uuid", "name": "Website Redesign" }
+      }
+    ],
     "recentActivity": [
       {
         "id": "uuid",
@@ -1183,8 +1198,9 @@ Returns statistics scoped to projects the current user is an `ACCEPTED` member o
 ```
 
 Notes on scope:
-- `totalProjects` / `activeTasks` / `completedTasks` / `overdueTasksCount` / `recentActivity` are scoped to **all projects the user belongs to** (any role, accepted only)
+- `totalProjects` / `activeTasks` / `completedTasks` / `overdueTasksCount` / `overdueTasks` / `recentActivity` are scoped to **all projects the user belongs to** (any role, accepted only)
 - `myTasks` is scoped to **tasks assigned to the user personally** (not filtered by project membership, but assignment already implies it), incomplete only, top 10 by soonest due date
+- `overdueTasks` is the top-10 (soonest-due-first) expansion of `overdueTasksCount` — same query, capped and materialized instead of just counted, includes `project: { id, name }` since these can span any project the user belongs to, not just ones a task is assigned to them in. Powers the Dashboard's expandable "Overdue" stat card.
 - There is no `taskStats` breakdown by status, no separate `upcomingDeadlines`/`projectProgress` blocks, and no per-role scope difference — this shape is the same for every user, since there's no account role to branch on
 
 ---
@@ -1285,6 +1301,7 @@ Task completion summary, delayed tasks, daily completion trend over the last 7 d
   "data": {
     "total": 40,
     "completed": 24,
+    "inProgress": 9,
     "delayed": 3,
     "completionRate": 60,
     "byPriority": { "LOW": 5, "MEDIUM": 18, "HIGH": 12, "CRITICAL": 5 },
@@ -1350,6 +1367,8 @@ Returns full report data as JSON for client-side PDF generation.
 ```
 
 **Frontend status:** `client/src/pages/ReportsPage.tsx` (route `/reports`) consumes all three report endpoints — stat cards + priority breakdown from `overview`, a table from `team-performance`, and a "Export JSON" button that downloads the `export` payload as a file. There's still no PDF generation (`client/package.json` has no PDF/chart library) — export is raw JSON, not a formatted PDF. The page's project picker only lists projects where `myRole === 'LEAD'` (see `GET /projects`), matching the endpoints' actual authorization.
+
+The four leftmost stat cards (Total, Completed, In Progress, Delayed) are each clickable and expand a shared drill-down panel below the stat row, listing the matching tasks (filtered client-side from the already-fetched `export` payload — no extra endpoint). The panel includes a member-filter `<select>` populated from `GET /projects/:id/members` (fetched per project in scope via `useQueries`), so a member with zero currently-matching tasks — most notably the project's Lead — still appears as a selectable filter option rather than only being derivable from `team-performance`'s per-assignee list (which only contains people who already have at least one assigned task).
 
 ---
 

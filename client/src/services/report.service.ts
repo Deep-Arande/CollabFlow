@@ -1,9 +1,10 @@
 import api from '../config/api';
-import type { ApiResponse } from '../types';
+import type { ApiResponse, Task, Project } from '../types';
 
 export interface ReportOverview {
   total: number;
   completed: number;
+  inProgress: number;
   delayed: number;
   completionRate: number;
   byPriority: Record<string, number>;
@@ -21,8 +22,8 @@ export interface TeamPerformanceEntry {
 }
 
 export interface ReportExport {
-  tasks: unknown[];
-  projects: unknown[];
+  tasks: Task[];
+  projects: Project[];
   generatedAt: string;
 }
 

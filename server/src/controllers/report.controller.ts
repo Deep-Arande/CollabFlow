@@ -26,10 +26,12 @@ export const getOverview = asyncHandler(async (req: Request, res: Response) => {
 
   const now = new Date();
 
-  const [total, completed, delayed, byPriority, completedLast7Days] = await Promise.all([
+  const [total, completed, inProgress, delayed, byPriority, completedLast7Days] = await Promise.all([
     prisma.task.count({ where: taskWhere }),
 
     prisma.task.count({ where: { ...taskWhere, status: 'COMPLETED' } }),
+
+    prisma.task.count({ where: { ...taskWhere, status: 'IN_PROGRESS' } }),
 
     prisma.task.count({ where: { ...taskWhere, dueDate: { lt: now }, status: { not: 'COMPLETED' } } }),
 
@@ -57,6 +59,7 @@ export const getOverview = asyncHandler(async (req: Request, res: Response) => {
   return api.success(res, {
     total,
     completed,
+    inProgress,
     delayed,
     completionRate,
     byPriority: Object.fromEntries(byPriority.map((p) => [p.priority, p._count.priority])),
