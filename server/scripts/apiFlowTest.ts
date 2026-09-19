@@ -76,7 +76,6 @@ async function main() {
   check('register/login user C (outsider)', !!C.token);
 
   let projectId = '';
-  let taskId = '';
   try {
     // ---- Project create (A becomes LEAD) ----
     console.log('\nProject + membership:');
@@ -111,7 +110,7 @@ async function main() {
     console.log('\nTasks + RBAC:');
     const tc = await req('POST', `/projects/${projectId}/tasks`, { token: A.token, body: { title: 'Flow task', priority: 'HIGH', assignedTo: B.id } });
     check('A creates task assigned to B (201)', tc.status === 201, `got ${tc.status}`);
-    taskId = tc.body?.data?.task?.id ?? tc.body?.data?.id;
+    const taskId = tc.body?.data?.task?.id ?? tc.body?.data?.id;
     check('task id returned', !!taskId);
 
     // Negative: B cannot create a task (member, not lead)
