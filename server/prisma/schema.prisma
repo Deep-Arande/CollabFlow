@@ -42,6 +42,11 @@ enum InviteStatus {
   DECLINED
 }
 
+enum AttachmentScope {
+  TASK
+  PROJECT
+}
+
 model User {
   id           String   @id @default(uuid())
   name         String
@@ -73,11 +78,16 @@ model Project {
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
 
+  // Cached "Catch Me Up" summary (regenerated when stale > 30 min or ?force=true).
+  catchMeUpSummary String?   @db.Text
+  catchMeUpAt      DateTime?
+
   creator      User          @relation(fields: [createdBy], references: [id])
   members      ProjectMember[]
   tasks        Task[]
   labels       Label[]
   activityLogs ActivityLog[]
+  attachments  Attachment[]
 }
 
 model ProjectMember {
@@ -161,16 +171,42 @@ model CommentMention {
 }
 
 model Attachment {
-  id         String   @id @default(uuid())
-  taskId     String
-  uploadedBy String
-  filePath   String
-  fileType   FileType
-  fileName   String
-  createdAt  DateTime @default(now())
+  id            String          @id @default(uuid())
+  taskId        String?
+  projectId     String
+  uploadedBy    String
+  filePath      String
+  fileType      FileType
+  fileName      String
+  extractedText String?         @db.Text
+  scope         AttachmentScope
+  createdAt     DateTime        @default(now())
 
-  task     Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
-  uploader User @relation(fields: [uploadedBy], references: [id])
+  task     Task?           @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  project  Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  uploader User            @relation(fields: [uploadedBy], references: [id])
+  chunks   DocumentChunk[]
+}
+
+// RAG chunk store. The `embedding` column is pgvector's `vector(768)` type, which
+// Prisma cannot represent — it is declared Unsupported here and all reads/writes to
+// it go through raw SQL in services/vectorStore.ts. Never use prisma.documentChunk
+// .create()/.findMany() for the embedding; the ivfflat index is added by hand in the
+// migration SQL.
+model DocumentChunk {
+  id           String                     @id @default(uuid())
+  attachmentId String
+  projectId    String
+  chunkIndex   Int
+  content      String                     @db.Text
+  embedding    Unsupported("vector(768)")
+  tokenCount   Int?
+  createdAt    DateTime                   @default(now())
+
+  attachment Attachment @relation(fields: [attachmentId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([attachmentId])
 }
 
 model ActivityLog {

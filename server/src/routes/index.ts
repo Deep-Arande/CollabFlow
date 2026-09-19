@@ -11,6 +11,8 @@ import dashboardRoutes from './dashboard.routes';
 import activityRoutes from './activity.routes';
 import reportRoutes from './report.routes';
 import inviteRoutes from './invite.routes';
+import aiRoutes from './ai.routes';
+import projectDocumentRoutes from './projectDocument.routes';
 
 const router = Router();
 
@@ -18,10 +20,12 @@ router.use('/auth', authRoutes);
 router.use('/users', userRoutes);
 router.use('/invites', inviteRoutes);
 router.use('/projects', projectRoutes);
-router.use('/projects', taskRoutes);       // /projects/:projectId/tasks
-router.use('/projects', labelRoutes);      // /projects/:projectId/labels
-router.use('/tasks', commentRoutes);       // /tasks/:taskId/comments
-router.use('/tasks', attachmentRoutes);    // /tasks/:taskId/attachments
+router.use('/projects', taskRoutes);            // /projects/:projectId/tasks
+router.use('/projects', labelRoutes);           // /projects/:projectId/labels
+router.use('/projects', projectDocumentRoutes); // /projects/:projectId/attachments (project docs)
+router.use('/projects', aiRoutes);              // /projects/:projectId/catch-me-up | assistant
+router.use('/tasks', commentRoutes);            // /tasks/:taskId/comments
+router.use('/tasks', attachmentRoutes);         // /tasks/:taskId/attachments
 router.use('/mentions', mentionRoutes);
 router.use('/dashboard', dashboardRoutes);
 router.use('/activity', activityRoutes);

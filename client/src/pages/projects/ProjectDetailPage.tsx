@@ -4,10 +4,10 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { format } from 'date-fns';
+import { format, formatDistanceToNow } from 'date-fns';
 import {
   Plus, ArrowLeft, Trash2, MessageSquare, Calendar, User, Flag, Send, Shield, LogOut, Tag,
-  Paperclip, Upload, Download, FileText, Image as ImageIcon,
+  Paperclip, Upload, Download, FileText, Image as ImageIcon, Sparkles, Bot, RefreshCw,
 } from 'lucide-react';
 import { projectService } from '../../services/project.service';
 import { taskService } from '../../services/task.service';
@@ -16,6 +16,7 @@ import { activityService } from '../../services/activity.service';
 import { userService } from '../../services/user.service';
 import { labelService } from '../../services/label.service';
 import { attachmentService } from '../../services/attachment.service';
+import { aiService } from '../../services/ai.service';
 import { Header } from '../../components/layout/Header';
 import { Button } from '../../components/ui/Button';
 import { Input } from '../../components/ui/Input';
@@ -23,7 +24,7 @@ import { Select } from '../../components/ui/Select';
 import { Modal } from '../../components/ui/Modal';
 import { Badge } from '../../components/ui/Badge';
 import { Avatar } from '../../components/ui/Avatar';
-import { PageSpinner } from '../../components/ui/Spinner';
+import { PageSpinner, Spinner } from '../../components/ui/Spinner';
 import { useAuth } from '../../context/AuthContext';
 import { useSocket } from '../../context/SocketContext';
 import type { Task, TaskStatus, Comment, ProjectMember, Attachment } from '../../types';
@@ -391,7 +392,7 @@ export function ProjectDetailPage() {
   const qc = useQueryClient();
   const { user } = useAuth();
   const { joinProject, leaveProject, socket } = useSocket();
-  const [tab, setTab] = useState<'board' | 'members' | 'labels' | 'activity'>('board');
+  const [tab, setTab] = useState<'board' | 'files' | 'members' | 'labels' | 'activity' | 'assistant'>('board');
   const [newTaskStatus, setNewTaskStatus] = useState<TaskStatus | null>(null);
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const [addMemberOpen, setAddMemberOpen] = useState(false);
@@ -404,6 +405,13 @@ export function ProjectDetailPage() {
   const [labelName, setLabelName] = useState('');
   const [labelColor, setLabelColor] = useState('#6366f1');
   const createFileInputRef = useRef<HTMLInputElement>(null);
+  // AI features
+  const [catchMeUpOpen, setCatchMeUpOpen] = useState(false);
+  const [assistantQ, setAssistantQ] = useState('');
+  const projectDocInputRef = useRef<HTMLInputElement>(null);
+  const [showAssistantHint, setShowAssistantHint] = useState(
+    () => !!projectId && !localStorage.getItem(`cf_assistant_seen_${projectId}`),
+  );
 
   const pid = projectId!;
 
@@ -446,6 +454,12 @@ export function ProjectDetailPage() {
   const { data: allLabels = [] } = useQuery({
     queryKey: ['labels', pid],
     queryFn: () => labelService.list(pid),
+  });
+
+  const { data: projectDocs = [] } = useQuery({
+    queryKey: ['projectDocs', pid],
+    queryFn: () => attachmentService.listProjectDocs(pid),
+    enabled: tab === 'files',
   });
 
   // Real-time: join/leave socket room
@@ -562,12 +576,58 @@ export function ProjectDetailPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['labels', pid] }),
   });
 
+  // ── AI features ──
+  const {
+    mutate: runCatchMeUp,
+    data: catchMeUpData,
+    isPending: catchingUp,
+    error: catchMeUpErr,
+  } = useMutation({ mutationFn: (force: boolean) => aiService.catchMeUp(pid, force) });
+
+  const {
+    mutate: askAssistant,
+    data: assistantAnswer,
+    isPending: asking,
+    error: assistantErr,
+  } = useMutation({ mutationFn: (q: string) => aiService.askAssistant(pid, q) });
+
+  const { mutate: uploadProjectDoc, isPending: uploadingDoc } = useMutation({
+    mutationFn: (file: File) => attachmentService.uploadProjectDoc(pid, file),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['projectDocs', pid] }),
+    onError: (err: unknown) => setActionError(err instanceof Error ? err.message : 'Upload failed'),
+  });
+
+  const { mutate: deleteProjectDoc } = useMutation({
+    mutationFn: (id: string) => attachmentService.deleteProjectDoc(pid, id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['projectDocs', pid] }),
+    onError: (err: unknown) => setActionError(err instanceof Error ? err.message : 'Delete failed'),
+  });
+
   if (projectLoading) return <PageSpinner />;
   if (!project) return <div className="p-6 text-gray-500">Project not found.</div>;
 
   const tasks = taskData?.tasks ?? [];
   const myMembership = members.find((m) => m.userId === user?.id);
   const canManage = myMembership?.role === 'LEAD' && myMembership?.status === 'ACCEPTED';
+
+  const openProjectDoc = async (id: string) => {
+    try {
+      const url = await attachmentService.getProjectDocUrl(pid, id);
+      window.open(url, '_blank');
+    } catch {
+      setActionError('Could not open file');
+    }
+  };
+
+  const dismissAssistantHint = () => {
+    setShowAssistantHint(false);
+    localStorage.setItem(`cf_assistant_seen_${pid}`, '1');
+  };
+
+  const openCatchMeUp = () => {
+    setCatchMeUpOpen(true);
+    if (!catchMeUpData && !catchingUp) runCatchMeUp(false);
+  };
 
   const handleLeave = () => {
     const myTaskCount = tasks.filter((t) => t.assignedTo === user?.id).length;
@@ -590,6 +650,9 @@ export function ProjectDetailPage() {
         actions={
           <div className="flex items-center gap-2">
             <Badge variant={project.status} />
+            <Button variant="secondary" size="sm" onClick={openCatchMeUp}>
+              <Sparkles className="h-4 w-4" /> Catch me up
+            </Button>
             {canManage && project.status === 'ACTIVE' && (
               <Button variant="secondary" size="sm" onClick={() => { if (confirm('Archive this project?')) archiveProject(); }}>
                 Archive
@@ -615,7 +678,7 @@ export function ProjectDetailPage() {
       {/* Tabs */}
       <div className="border-b border-gray-200 bg-white px-6">
         <div className="flex gap-1">
-          {(['board', 'members', 'labels', 'activity'] as const).map((t) => (
+          {(['board', 'files', 'members', 'labels', 'activity', 'assistant'] as const).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -804,6 +867,149 @@ export function ProjectDetailPage() {
               ))
             )}
           </div>
+        </div>
+      )}
+
+      {/* Files (project-scoped documents) */}
+      {tab === 'files' && (
+        <div className="p-6 max-w-3xl space-y-4">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <h3 className="text-sm font-semibold text-gray-700">Project documents</h3>
+              <p className="text-xs text-gray-400">
+                Files for the whole project (requirements, guides, notes). Any member can upload; PDFs & DOCX become searchable by the Assistant.
+              </p>
+            </div>
+            <input
+              ref={projectDocInputRef}
+              type="file"
+              accept=".pdf,.jpg,.jpeg,.png,.gif,.webp,.docx"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) uploadProjectDoc(file);
+                e.target.value = '';
+              }}
+            />
+            <Button size="sm" isLoading={uploadingDoc} onClick={() => projectDocInputRef.current?.click()}>
+              <Upload className="h-4 w-4" /> Upload
+            </Button>
+          </div>
+          <div className="rounded-xl border border-gray-200 bg-white divide-y divide-gray-100">
+            {projectDocs.length === 0 ? (
+              <p className="px-5 py-8 text-center text-sm text-gray-400">
+                No documents yet. Upload a PDF or DOCX to make it available to the Assistant.
+              </p>
+            ) : (
+              projectDocs.map((doc) => (
+                <div key={doc.id} className="flex items-center gap-3 px-5 py-3.5">
+                  {doc.fileType === 'IMAGE'
+                    ? <ImageIcon className="h-5 w-5 shrink-0 text-gray-400" />
+                    : <FileText className="h-5 w-5 shrink-0 text-gray-400" />}
+                  <div className="flex-1 min-w-0">
+                    <button
+                      onClick={() => openProjectDoc(doc.id)}
+                      className="block text-left text-sm font-medium text-gray-900 hover:text-indigo-600 truncate"
+                    >
+                      {doc.fileName}
+                    </button>
+                    <p className="text-xs text-gray-400">
+                      {doc.uploader?.name ?? 'Someone'} · {format(new Date(doc.createdAt), 'MMM d, yyyy')}
+                    </p>
+                  </div>
+                  <button onClick={() => openProjectDoc(doc.id)} className="text-gray-400 hover:text-indigo-600" title="Download">
+                    <Download className="h-4 w-4" />
+                  </button>
+                  {(doc.uploadedBy === user?.id || canManage) && (
+                    <button
+                      onClick={() => { if (confirm('Delete this file?')) deleteProjectDoc(doc.id); }}
+                      className="text-gray-400 hover:text-red-600"
+                      title="Delete"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Project Assistant (RAG-grounded Q&A) */}
+      {tab === 'assistant' && (
+        <div className="p-6 max-w-2xl space-y-4">
+          {showAssistantHint && (
+            <div className="flex items-start gap-3 rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-3">
+              <Bot className="mt-0.5 h-5 w-5 shrink-0 text-indigo-600" />
+              <div className="flex-1 text-sm">
+                <p className="font-medium text-indigo-900">Welcome! Meet the Project Assistant.</p>
+                <p className="text-indigo-700">Ask anything about this project — tasks, who's doing what, or the contents of uploaded documents.</p>
+              </div>
+              <button onClick={dismissAssistantHint} className="text-indigo-400 hover:text-indigo-600">×</button>
+            </div>
+          )}
+
+          <div className="flex flex-wrap gap-2">
+            {['Give me an overview', "What's currently blocked?", "Who's working on what?"].map((p) => (
+              <button
+                key={p}
+                onClick={() => { setAssistantQ(p); askAssistant(p); }}
+                className="rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs text-gray-600 transition-colors hover:border-indigo-300 hover:text-indigo-600"
+              >
+                {p}
+              </button>
+            ))}
+          </div>
+
+          <form
+            onSubmit={(e) => { e.preventDefault(); const q = assistantQ.trim(); if (q) askAssistant(q); }}
+            className="flex gap-2"
+          >
+            <input
+              value={assistantQ}
+              onChange={(e) => setAssistantQ(e.target.value)}
+              placeholder="Ask about this project…"
+              className="flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+            <Button type="submit" isLoading={asking} disabled={!assistantQ.trim()}>
+              <Send className="h-4 w-4" /> Ask
+            </Button>
+          </form>
+
+          {asking && (
+            <div className="flex items-center gap-3 py-6 text-gray-500">
+              <Spinner size="sm" /> <span className="text-sm">Thinking…</span>
+            </div>
+          )}
+
+          {assistantErr && !asking && (
+            <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
+              {(assistantErr as any)?.response?.data?.message ||
+                (assistantErr as Error)?.message ||
+                'Could not get an answer. Please try again.'}
+            </div>
+          )}
+
+          {assistantAnswer && !asking && (
+            <div className="space-y-3 rounded-xl border border-gray-200 bg-white p-4">
+              <div className="flex items-start gap-3">
+                <Bot className="mt-0.5 h-5 w-5 shrink-0 text-indigo-600" />
+                <p className="whitespace-pre-wrap text-sm leading-relaxed text-gray-700">{assistantAnswer.answer}</p>
+              </div>
+              {assistantAnswer.sources.length > 0 && (
+                <div className="border-t border-gray-100 pt-2 text-xs text-gray-400">
+                  Sources:{' '}
+                  {assistantAnswer.sources.map((s, i) => (
+                    <span key={s.id}>
+                      {i > 0 && ', '}
+                      <button onClick={() => openProjectDoc(s.id)} className="text-indigo-500 hover:underline">{s.fileName}</button>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -1009,6 +1215,40 @@ export function ProjectDetailPage() {
               Send Invite
             </Button>
           </div>
+        </div>
+      </Modal>
+
+      {/* Catch me up modal */}
+      <Modal isOpen={catchMeUpOpen} onClose={() => setCatchMeUpOpen(false)} title="Catch me up" size="lg">
+        <div className="space-y-4">
+          {catchingUp ? (
+            <div className="flex items-center justify-center gap-3 py-10 text-gray-500">
+              <Spinner size="sm" /> <span className="text-sm">Generating summary…</span>
+            </div>
+          ) : catchMeUpErr ? (
+            <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
+              {(catchMeUpErr as any)?.response?.data?.message ||
+                (catchMeUpErr as Error)?.message ||
+                'Could not generate the summary. Please try again.'}
+            </div>
+          ) : catchMeUpData ? (
+            <>
+              <p className="whitespace-pre-wrap text-sm leading-relaxed text-gray-700">
+                {catchMeUpData.summary}
+              </p>
+              <div className="flex items-center justify-between border-t border-gray-100 pt-3">
+                <span className="text-xs text-gray-400">
+                  Generated {formatDistanceToNow(new Date(catchMeUpData.generatedAt), { addSuffix: true })}
+                  {catchMeUpData.cached ? ' (cached)' : ''}
+                </span>
+                <Button variant="secondary" size="sm" isLoading={catchingUp} onClick={() => runCatchMeUp(true)}>
+                  <RefreshCw className="h-4 w-4" /> Refresh
+                </Button>
+              </div>
+            </>
+          ) : (
+            <p className="py-10 text-center text-sm text-gray-400">No summary yet.</p>
+          )}
         </div>
       </Modal>
     </div>
