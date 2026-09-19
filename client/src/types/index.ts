@@ -88,16 +88,36 @@ export interface Comment {
   mentions?: { mentionedUser: User }[];
 }
 
+export type AttachmentScope = 'TASK' | 'PROJECT';
+
 export interface Attachment {
   id: string;
-  taskId: string;
+  taskId?: string | null;
+  projectId: string;
   uploadedBy: string;
   filePath: string;
   fileType: string;
   fileName: string;
+  scope?: AttachmentScope;
   createdAt: string;
   url?: string;
   uploader?: { id: string; name: string };
+}
+
+export interface CatchMeUpResult {
+  summary: string;
+  generatedAt: string;
+  cached?: boolean;
+}
+
+export interface AssistantSource {
+  id: string;
+  fileName: string;
+}
+
+export interface AssistantAnswer {
+  answer: string;
+  sources: AssistantSource[];
 }
 
 export interface Mention {
